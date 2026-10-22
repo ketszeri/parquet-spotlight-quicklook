@@ -1,0 +1,224 @@
+# Fork-only SonarQube Cloud analysis for ketszeri/parquet-spotlight-quicklook.
+# Keep this workflow out of pull requests to the upstream repository.
+# It does not modify the product build scripts. C and Objective-C are analyzed
+# from a compilation database captured by Build Wrapper around scripts/build.sh.
+# Swift is parsed by the scanner. Rust (native/parquet_preview, only on some
+# refs) is analyzed when that crate is in the checkout, with a Clippy JSON report.
+
+name: SonarCloud
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to check out and publish as a SonarQube Cloud branch analysis
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarcloud-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonarcloud:
+    name: Analyze
+    runs-on: macos-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_WRAPPER_OUT_DIR: bw-output
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check out requested ref
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+        run: |
+          set -euo pipefail
+          ref=""
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            ref="$INPUT_REF"
+          fi
+          ref="${ref#refs/heads/}"
+          if [[ -n "$ref" ]]; then
+            if [[ ! "$ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "Ref contains unsupported characters: $ref" >&2
+              exit 1
+            fi
+            git fetch --no-tags origin "$ref"
+            git checkout --detach FETCH_HEAD
+            # The analyzed ref does not carry this fork's scanner config.
+            git checkout "$GITHUB_SHA" -- sonar-project.properties
+          fi
+          {
+            echo "ref=$ref"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Rosetta for Build Wrapper
+        if: runner.arch == 'ARM64'
+        run: |
+          set -euo pipefail
+          if arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+            echo "Rosetta is available"
+          else
+            softwareupdate --install-rosetta --agree-to-license
+          fi
+
+      - name: Install Rust for the preview crate
+        if: hashFiles('native/parquet_preview/Cargo.toml') != ''
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Install Build Wrapper
+        id: build-wrapper
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+
+      - name: Build with Build Wrapper
+        run: |
+          set -euo pipefail
+          bw="${{ steps.build-wrapper.outputs.build-wrapper-binary }}"
+          if [[ -z "$bw" ]]; then
+            echo "Build Wrapper path was empty" >&2
+            exit 1
+          fi
+          "$bw" --out-dir "$BUILD_WRAPPER_OUT_DIR" bash --noprofile --norc -eo pipefail -c '
+            ./scripts/build.sh
+            if [[ -f Tests/preview_host_glue.m ]]; then
+              sdk="$(xcrun --show-sdk-path)"
+              mkdir -p build
+              clang \
+                -isysroot "$sdk" \
+                -mmacosx-version-min=12.0 \
+                -Wall -Wextra -Werror \
+                -O2 \
+                -c Tests/preview_host_glue.m \
+                -o build/preview_host_glue.o
+            fi
+          '
+
+      - name: Check compilation database
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import sys
+          path = "bw-output/compile_commands.json"
+          try:
+              data = json.load(open(path))
+          except FileNotFoundError:
+              sys.exit(f"missing {path}")
+          def command_text(entry):
+              args = entry.get("arguments")
+              if isinstance(args, list) and args:
+                  return " ".join(str(part) for part in args)
+              return str(entry.get("command") or "")
+
+          def is_internal_cc1(entry):
+              args = entry.get("arguments")
+              if isinstance(args, list) and "-cc1" in args:
+                  return True
+              return " -cc1" in command_text(entry)
+
+          def driver_score(entry):
+              text = f" {command_text(entry)} "
+              score = 0
+              if " -c " in text:
+                  score += 10
+              if " -bundle " in text:
+                  score += 5
+              if " -E " in text:
+                  score -= 20
+              return score
+
+          # Build Wrapper also records clang -cc1 frontend invocations. Those are
+          # not supported compilation units, and they are longer than the driver
+          # command, so keep one driver command per file.
+          drivers = [entry for entry in data if not is_internal_cc1(entry)]
+          pool = drivers or data
+          best = {}
+          for entry in pool:
+              filename = entry.get("file", "")
+              previous = best.get(filename)
+              if previous is None or driver_score(entry) > driver_score(previous):
+                  best[filename] = entry
+          deduped = [best[name] for name in sorted(best)]
+          with open(path, "w") as handle:
+              json.dump(deduped, handle)
+          print(f"compilation database entries: {len(data)} raw, {len(deduped)} driver files")
+          for filename, entry in best.items():
+              text = command_text(entry)
+              print(f"  {filename}")
+              print(f"    {text[:240]}")
+          if not deduped:
+              sys.exit("compilation database is empty")
+          PY
+
+      - name: Configure branch analysis and Clippy
+        env:
+          ANALYZE_REF: ${{ steps.target.outputs.ref }}
+          ANALYZE_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$ANALYZE_REF" && "$ANALYZE_REF" != "main" ]]; then
+            printf '\nsonar.branch.name=%s\n' "$ANALYZE_REF" >> sonar-project.properties
+            printf 'sonar.scm.revision=%s\n' "$ANALYZE_SHA" >> sonar-project.properties
+          fi
+          if [[ -d native ]]; then
+            python3 -c 'from pathlib import Path; p = Path("sonar-project.properties"); t = p.read_text(); old = "sonar.sources=src,preview,Sources,scripts,plist,resources,.github"; assert old in t, "sonar.sources entry not found"; p.write_text(t.replace(old, old + ",native", 1))'
+          fi
+          if [[ -f native/parquet_preview/Cargo.toml ]]; then
+            export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/build/native-target"
+            mkdir -p build
+            set +e
+            (
+              cd native/parquet_preview
+              cargo clippy --locked --all-targets --message-format=json
+            ) > build/clippy-report.json
+            status=$?
+            set -e
+            if [[ "$status" -ne 0 ]]; then
+              echo "cargo clippy exited ${status}; the JSON report will still be imported"
+            fi
+            if [[ ! -s build/clippy-report.json ]]; then
+              echo "Clippy report is empty" >&2
+              exit 1
+            fi
+            # Import Clippy instead of letting the scanner run it a second time.
+            # manifestPaths points the analyzer at the nested crate.
+            {
+              echo "sonar.rust.cargo.manifestPaths=native/parquet_preview/Cargo.toml"
+              echo "sonar.rust.clippy.enabled=false"
+              echo "sonar.rust.clippyReport.reportPaths=build/clippy-report.json"
+            } >> sonar-project.properties
+          fi
+          echo "---- sonar-project.properties ----"
+          cat sonar-project.properties
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+          GITHUB_SHA: ${{ steps.target.outputs.ref != '' && steps.target.outputs.sha || github.sha }}
+          GITHUB_REF: ${{ steps.target.outputs.ref != '' && format('refs/heads/{0}', steps.target.outputs.ref) || github.ref }}
