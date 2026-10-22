@@ -49,7 +49,7 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         PreviewLog.stage("prepare.main")
         var folderError: NSError?
         let failure = ParquetCatchException {
-            NSApp.disableAutomaticTermination("Parquet Quick Look preview")
+            ProcessInfo.processInfo.disableAutomaticTermination("Parquet Quick Look preview")
             folderError = self.buildPreview(of: url)
         }
         if let failure {
