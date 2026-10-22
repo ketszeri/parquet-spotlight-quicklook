@@ -388,7 +388,8 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
 
             if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                dataset.totalSize += UInt64(size)
+                let (sum, overflow) = dataset.totalSize.addingReportingOverflow(UInt64(size))
+                dataset.totalSize = overflow ? UInt64.max : sum
             }
 
             parsePartitionSegments(from: fileURL, baseFolder: folderURL) { key, value in
@@ -404,7 +405,8 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                 continue
             }
             dataset.validFileCount += 1
-            dataset.totalRows += max(0, fileMetadata.rowCount)
+            let (rows, overflow) = dataset.totalRows.addingReportingOverflow(max(0, fileMetadata.rowCount))
+            dataset.totalRows = overflow ? Int64.max : rows
 
             for col in fileMetadata.columns {
                 var types = typeMap[col.name] ?? Set<String>()
