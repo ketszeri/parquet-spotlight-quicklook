@@ -147,9 +147,24 @@ enum RowPreviewLogic {
                 if left > right { return .orderedDescending }
                 return .orderedSame
             }
-            return lhs.compare(rhs, options: [.caseInsensitive, .numeric], locale: Locale(identifier: "en_US_POSIX"))
+            return foldedCompare(lhs, rhs)
         case .date, .text:
-            return lhs.compare(rhs, options: [.caseInsensitive, .numeric], locale: Locale(identifier: "en_US_POSIX"))
+            return foldedCompare(lhs, rhs)
         }
+    }
+
+    /// Fold case with the POSIX locale, then compare.
+    ///
+    /// `String.compare(_:options:locale:)` with `en_US_POSIX` uses that locale's
+    /// binary collation and ignores `.caseInsensitive`, which sorted "C" before
+    /// "a" on the macOS CI runner. Folding first keeps the order stable across
+    /// locales and still applies numeric ordering ("a2" before "a10").
+    private static func foldedCompare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let locale = Locale(identifier: "en_US_POSIX")
+        return lhs.lowercased(with: locale).compare(
+            rhs.lowercased(with: locale),
+            options: [.numeric],
+            locale: locale
+        )
     }
 }
