@@ -99,4 +99,12 @@ if calls != 1 {
     fputs("handler calls=\(calls) after layout, expected 1\n", stderr)
     exit(1)
 }
+if expected == "rows" {
+    guard let aligned = viewController.perform(NSSelectorFromString("exerciseFilterAlignmentForTest"))?
+        .takeUnretainedValue() as? NSNumber, aligned.intValue == 1 else {
+        fputs("filter fields do not match column rects after resize and scroll\n", stderr)
+        exit(1)
+    }
+    fputs("filter alignment ok\n", stderr)
+}
 print("PASS: preview host \(status)")

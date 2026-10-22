@@ -125,6 +125,10 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         preferredContentSize = RowPreviewLayout.clampedWindowSize(RowPreviewLayout.schemaOnlySize)
     }
 
+    /// The host test calls this on the principal class after the preview is in a window.
+    @objc func exerciseFilterAlignmentForTest() -> NSNumber {
+        (view as? ParquetQuickLookView)?.exerciseFilterAlignmentForTest() ?? 0
+    }
 }
 
 final class SchemaNode: NSObject {
@@ -153,6 +157,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private var showingRows = true
     private var didExpand = false
     private var adjustingTable = false
+    private var geometryObserversInstalled = false
+    private var aligningFilters = false
 
     private let rowsSegment = 0
     private let schemaSegment = 1
@@ -341,11 +347,17 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         table.delegate = self
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
-        table.allowsColumnReordering = false
+        table.allowsColumnReordering = true
+        table.allowsColumnResizing = true
         table.rowHeight = RowPreviewLayout.rowHeight
         table.style = .plain
         tableScroll.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(self, selector: #selector(tableScrolled), name: NSView.boundsDidChangeNotification, object: tableScroll.contentView)
+        if !geometryObserversInstalled {
+            geometryObserversInstalled = true
+            NotificationCenter.default.addObserver(self, selector: #selector(tableScrolled), name: NSView.boundsDidChangeNotification, object: tableScroll.contentView)
+            NotificationCenter.default.addObserver(self, selector: #selector(columnGeometryChanged(_:)), name: NSTableView.columnDidResizeNotification, object: table)
+            NotificationCenter.default.addObserver(self, selector: #selector(columnGeometryChanged(_:)), name: NSTableView.columnDidMoveNotification, object: table)
+        }
 
         filterScroll.hasVerticalScroller = false
         filterScroll.hasHorizontalScroller = false
@@ -479,9 +491,18 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     @objc private func tableScrolled() {
-        let origin = tableScroll.contentView.bounds.origin
-        filterScroll.contentView.scroll(to: NSPoint(x: origin.x, y: 0))
-        filterScroll.reflectScrolledClipView(filterScroll.contentView)
+        alignFilterFields()
+    }
+
+    @objc private func columnGeometryChanged(_ notification: Notification) {
+        guard !adjustingTable else { return }
+        alignFilterFields()
+    }
+
+    override func layout() {
+        super.layout()
+        guard window != nil, !adjustingTable else { return }
+        alignFilterFields()
     }
 
     private func reloadVisible() {
@@ -511,19 +532,37 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             frame.size.width = needed
             table.frame = frame
         }
-        var document = filterDocument.frame
-        document.size.width = max(needed, document.size.width)
-        document.size.height = 26
-        filterDocument.frame = document
     }
 
     private func layoutFilterFields() {
-        var x: CGFloat = 56
-        for (index, field) in filterFields.enumerated() {
-            let width = index + 1 < table.tableColumns.count ? table.tableColumns[index + 1].width : RowPreviewLayout.columnWidth
-            field.frame = NSRect(x: x + 2, y: 2, width: max(40, width - 6), height: 22)
-            x += width
-        }
+        alignFilterFields()
+    }
+
+    private func alignFilterFields() {
+        guard !aligningFilters else { return }
+        aligningFilters = true
+        FilterFieldLayout.align(table: table, document: filterDocument, fields: filterFields)
+        aligningFilters = false
+    }
+
+    /// Host test: resize a column, scroll sideways, and require the fields to
+    /// keep the column rects. Returns 1 when every visible field matches.
+    @objc func exerciseFilterAlignmentForTest() -> NSNumber {
+        guard table.tableColumns.count > 1, !filterFields.isEmpty, window != nil else { return 0 }
+        alignFilterFields()
+        let column = table.tableColumns[1]
+        column.width += 40
+        alignFilterFields()
+        guard FilterFieldLayout.matchesColumnRects(table: table, fields: filterFields) else { return 0 }
+        column.width += 900
+        widenTable()
+        alignFilterFields()
+        let clip = tableScroll.contentView
+        let scrolled = NSPoint(x: clip.bounds.origin.x + 30, y: clip.bounds.origin.y)
+        clip.scroll(to: scrolled)
+        tableScroll.reflectScrolledClipView(clip)
+        tableScrolled()
+        return FilterFieldLayout.matchesColumnRects(table: table, fields: filterFields) ? 1 : 0
     }
 
     override func viewDidMoveToWindow() {

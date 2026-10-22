@@ -37,7 +37,7 @@ The table:
 - shows at most 50 columns and says how many were hidden
 - fills the preview when the window is resized, and scrolls in both directions with the header kept visible
 - sorts when a column header is clicked (ascending, descending, then off). Numbers and decimals sort numerically, dates and timestamps sort in time order, other values sort as text, and nulls stay last
-- filters from the search field and from the field under each column. Filtering and sorting use the rows already loaded
+- filters from the search field and from the field under each column. Each column field uses that column's x and width, and follows a resize, reorder, or horizontal scroll. Filtering and sorting use the rows already loaded
 
 The window size follows the visible frame of the screen Finder is on, minus a margin. A wide table uses that width. A narrow or short table stays compact. Quick Look does not report the destination screen, so the extension uses `NSScreen.main` when that call succeeds. If there is no screen, or the size is not a real display, the window is clamped between 420×280 and 4096×4096.
 

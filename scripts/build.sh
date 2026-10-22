@@ -163,6 +163,7 @@ swiftc \
   "$ROOT_DIR/preview/extension/PreviewProvider.swift" \
   "$ROOT_DIR/preview/extension/PreviewLog.swift" \
   "$ROOT_DIR/preview/extension/RowPreview.swift" \
+  "$ROOT_DIR/preview/extension/FilterFieldLayout.swift" \
   "$ROOT_DIR/preview/extension/ParquetPreviewController.swift" \
   "$BUILD_DIR/NSExtensionMain.o" \
   "$BUILD_DIR/PreviewException.o" \
