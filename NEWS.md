@@ -1,6 +1,8 @@
 # News
 
-## Unreleased
+## 0.5.0-ketszeri.4 - 2026-10-22
+
+Fork release. Update checks look at this fork's GitHub releases.
 
 ### Enhancements
 

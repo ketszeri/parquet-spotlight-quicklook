@@ -141,7 +141,7 @@ private final class AppModel: ObservableObject {
     private let previewCacheDir = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Caches/com.rkrug.parquetindexer.previewhost.preview")
     private let updateValidator = ParquetUpdateValidator()
-    private let releaseCheckURL = URL(string: "https://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")!
+    private let releaseCheckURL = URL(string: "https://api.github.com/repos/ketszeri/parquet-spotlight-quicklook/releases/latest")!
 
     init() {
         loadSettings()

@@ -65,8 +65,8 @@ public struct ParquetUpdateValidator {
     public init(
         expectedGitHubHost: String = "github.com",
         expectedGitHubAPIHost: String = "api.github.com",
-        expectedRepoPath: String = "/rkrug/parquet-spotlight-quicklook",
-        expectedReleasesLatestPath: String = "/repos/rkrug/parquet-spotlight-quicklook/releases/latest"
+        expectedRepoPath: String = "/ketszeri/parquet-spotlight-quicklook",
+        expectedReleasesLatestPath: String = "/repos/ketszeri/parquet-spotlight-quicklook/releases/latest"
     ) {
         self.expectedGitHubHost = expectedGitHubHost
         self.expectedGitHubAPIHost = expectedGitHubAPIHost

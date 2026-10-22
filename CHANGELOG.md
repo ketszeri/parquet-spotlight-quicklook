@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 0.5.0-ketszeri.4 - 2026-10-22
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original author is rkrug. This fork stays MIT licensed. The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
 
 - Added a Quick Look rows view beside the schema:
   - first 100 rows by default, or 10, 50, 500, or 1000 from the app and the preview

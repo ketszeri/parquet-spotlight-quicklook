@@ -42,19 +42,19 @@ func runCoreTests() {
     // Trusted URLs.
     let validator = ParquetUpdateValidator()
     assertTrue(
-        validator.isTrustedReleaseAPIResponseURL(URL(string: "https://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")),
+        validator.isTrustedReleaseAPIResponseURL(URL(string: "https://api.github.com/repos/ketszeri/parquet-spotlight-quicklook/releases/latest")),
         "trusted GitHub API URL should pass"
     )
     assertTrue(
-        !validator.isTrustedReleaseAPIResponseURL(URL(string: "http://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")),
+        !validator.isTrustedReleaseAPIResponseURL(URL(string: "http://api.github.com/repos/ketszeri/parquet-spotlight-quicklook/releases/latest")),
         "http API URL should fail"
     )
     assertTrue(
-        validator.isTrustedReleasePageURL(URL(string: "https://github.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
+        validator.isTrustedReleasePageURL(URL(string: "https://github.com/ketszeri/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
         "trusted release page should pass"
     )
     assertTrue(
-        !validator.isTrustedReleasePageURL(URL(string: "https://example.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
+        !validator.isTrustedReleasePageURL(URL(string: "https://example.com/ketszeri/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
         "wrong release host should fail"
     )
 
