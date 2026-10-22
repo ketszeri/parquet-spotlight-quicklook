@@ -78,6 +78,7 @@ swiftc \
   -module-cache-path "$SWIFT_MODULE_CACHE" \
   -O \
   "$ROOT_DIR"/Sources/ParquetCore/*.swift \
+  "$ROOT_DIR"/preview/shared/*.swift \
   "$ROOT_DIR/preview/app/AppMain.swift" \
   -framework AppKit \
   -framework Foundation \
@@ -98,19 +99,84 @@ clang \
   -c "$ROOT_DIR/preview/extension/NSExtensionMain.m" \
   -o "$BUILD_DIR/NSExtensionMain.o"
 
+# Row decoding is linked only into the Quick Look extension.
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "FAIL: cargo is required to build Quick Look row preview (install Rust from https://rustup.rs)" >&2
+  exit 1
+fi
+export MACOSX_DEPLOYMENT_TARGET=12.0
+export CARGO_TARGET_DIR="$BUILD_DIR/native-target"
+NATIVE_MANIFEST="$ROOT_DIR/native/parquet_preview/Cargo.toml"
+case "$(uname -m)" in
+  arm64) RUST_HOST_TARGET="aarch64-apple-darwin" ;;
+  x86_64) RUST_HOST_TARGET="x86_64-apple-darwin" ;;
+  *)
+    echo "FAIL: unsupported architecture $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+if [[ "$RUST_HOST_TARGET" == "aarch64-apple-darwin" ]]; then
+  RUST_OTHER_TARGET="x86_64-apple-darwin"
+else
+  RUST_OTHER_TARGET="aarch64-apple-darwin"
+fi
+# Host build lands in $CARGO_TARGET_DIR/release so `cargo test --release` reuses it.
+cargo build --release --locked --manifest-path "$NATIVE_MANIFEST" --lib
+HOST_PREVIEW_LIB="$CARGO_TARGET_DIR/release/libparquet_preview.a"
+ROW_PREVIEW_LIB="$BUILD_DIR/libparquet_preview.a"
+RUST_TARGETS="$RUST_HOST_TARGET"
+if rustup target add "$RUST_OTHER_TARGET" >/dev/null 2>&1 \
+  && cargo build --release --locked --manifest-path "$NATIVE_MANIFEST" --target "$RUST_OTHER_TARGET" --lib; then
+  OTHER_PREVIEW_LIB="$CARGO_TARGET_DIR/$RUST_OTHER_TARGET/release/libparquet_preview.a"
+  lipo -create "$HOST_PREVIEW_LIB" "$OTHER_PREVIEW_LIB" -output "$ROW_PREVIEW_LIB"
+  RUST_TARGETS="$RUST_HOST_TARGET,$RUST_OTHER_TARGET"
+  echo "Linked universal row-preview library"
+else
+  echo "note: row preview built for $RUST_HOST_TARGET only"
+  cp "$HOST_PREVIEW_LIB" "$ROW_PREVIEW_LIB"
+fi
+
 # Build modern Quick Look preview extension executable
 swiftc \
   -parse-as-library \
   -module-name ParquetQuickLookExtension \
   -module-cache-path "$SWIFT_MODULE_CACHE" \
   -O \
+  -import-objc-header "$ROOT_DIR/preview/extension/ParquetPreview.h" \
+  "$ROOT_DIR"/preview/shared/*.swift \
   "$ROOT_DIR/preview/extension/PreviewProvider.swift" \
+  "$ROOT_DIR/preview/extension/RowPreview.swift" \
+  "$ROOT_DIR/preview/extension/ParquetPreviewController.swift" \
   "$BUILD_DIR/NSExtensionMain.o" \
+  "$ROW_PREVIEW_LIB" \
   -framework AppKit \
   -framework Foundation \
   -framework QuickLookUI \
   -framework UniformTypeIdentifiers \
+  -framework CoreFoundation \
+  -framework Security \
+  -framework SystemConfiguration \
+  -liconv \
+  -lresolv \
   -o "$APPEX_MACOS_DIR/ParquetQuickLookExtension"
+
+mkdir -p "$APP_RESOURCES_DIR/Licenses"
+cp "$ROOT_DIR/licenses/apache-arrow-LICENSE.txt" "$APP_RESOURCES_DIR/Licenses/apache-arrow-LICENSE.txt"
+cp "$ROOT_DIR/licenses/apache-arrow-NOTICE.txt" "$APP_RESOURCES_DIR/Licenses/apache-arrow-NOTICE.txt"
+cp "$ROOT_DIR/LICENSE" "$APP_RESOURCES_DIR/Licenses/MIT-LICENSE.txt"
+
+STATIC_BYTES="$(stat -f%z "$ROW_PREVIEW_LIB")"
+APPEX_BYTES="$(stat -f%z "$APPEX_MACOS_DIR/ParquetQuickLookExtension")"
+IMPORTER_BYTES="$(stat -f%z "$MD_MACOS_DIR/ParquetImporter")"
+cat > "$BUILD_DIR/size-report.txt" <<EOF
+staticlib_bytes=$STATIC_BYTES
+appex_executable_bytes=$APPEX_BYTES
+importer_executable_bytes=$IMPORTER_BYTES
+rust_targets=$RUST_TARGETS
+EOF
+echo "Row preview static library: $STATIC_BYTES bytes"
+echo "Quick Look extension executable: $APPEX_BYTES bytes"
+echo "Spotlight importer executable: $IMPORTER_BYTES bytes"
 
 cp "$ROOT_DIR/preview/extension/Info.plist" "$APPEX_CONTENTS_DIR/Info.plist"
 

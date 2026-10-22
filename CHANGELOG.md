@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+- Added a Quick Look rows view beside the schema:
+  - first 100 rows by default, or 10, 50, 500, or 1000 from the app and the preview
+  - at most 50 columns, with a note when some are hidden
+  - long values truncated, with the longer text in a tooltip
+  - compact struct, list, and map rendering
+  - nulls shown as `null`
+  - `Showing N of M rows` when the table is shorter than the file
+  - header click sorts ascending, descending, or off (numbers, dates, text; nulls last)
+  - search field and per-column filter on the loaded rows
+  - window size follows the visible screen; the table fills the window
+  - folder datasets preview rows from the first readable file in the scan.
+- **Show row preview** in the host app. Off skips the decoder and shows the schema only. The default is `RowPreviewDefaults.showsRowPreviewByDefault` (set it to `false` to ship schema-only until the user opts in).
+- Row decoding runs only in the sandboxed Quick Look extension (no network entitlement). The Spotlight importer is still footer metadata only.
+- Decoder is Apache Arrow Rust `parquet` 60 (Apache-2.0) behind `native/parquet_preview` and a small C ABI. Codecs: Snappy, ZSTD, GZIP, LZ4, and uncompressed. Dictionary and plain encodings. Logical types include timestamp, decimal, date, string, and UUID.
+- Decode limits: 32 MiB read, 2 s wall time, 1000 rows, 50 columns. Errors and timeouts fall back to the schema view.
+- The rows UI is a native Quick Look view. Data-based HTML does not run the controls, and `WKWebView` would need a network entitlement this extension does not have.
+- CI on `macos-latest` builds the importer, extension, and app, runs the script and decoder tests, and uploads a DMG and zip.
+
 ## 0.4.2 - 2026-03-12
 
 - Fixed GitHub Release Assets workflow shell compatibility:

@@ -1,5 +1,16 @@
 # News
 
+## Unreleased
+
+### Enhancements
+
+- Quick Look can show the first rows of a Parquet file next to the schema. Turn it off with **Show row preview**.
+- Choose 10, 50, 100, 500, or 1000 rows. The window follows the screen, and the table fills that window.
+- Click a column to sort. Filter all columns, or one column, without leaving Quick Look.
+- A dataset folder previews rows from its first readable Parquet file.
+- If a file cannot be decoded in time, Quick Look stays on the schema and explains why.
+- The Spotlight importer still indexes footer metadata only.
+
 ## 0.4.2 - 2026-03-12
 
 ### Bug Fixes

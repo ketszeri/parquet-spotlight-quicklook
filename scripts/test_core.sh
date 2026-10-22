@@ -15,7 +15,9 @@ xcrun swiftc \
   -sdk "$SDK_PATH" \
   -O \
   "$ROOT_DIR"/Sources/ParquetCore/*.swift \
+  "$ROOT_DIR"/preview/shared/*.swift \
   "$ROOT_DIR/Tests/core_tests.swift" \
+  "$ROOT_DIR/Tests/row_preview_logic_tests.swift" \
   -o "$BIN"
 
 "$BIN"

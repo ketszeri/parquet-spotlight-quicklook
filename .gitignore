@@ -1,6 +1,7 @@
 # Build artifacts
 build/
 release/
+native/parquet_preview/target/
 
 # macOS
 .DS_Store

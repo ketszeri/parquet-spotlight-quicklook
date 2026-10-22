@@ -11,8 +11,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build bundles
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build importer, Quick Look extension, and app
         run: ./scripts/build.sh
 
-      - name: Script smoke tests
+      - name: Run script, core, and row-preview tests
         run: ./scripts/test_scripts.sh
+
+      - name: Package DMG and zip
+        run: ./scripts/package_ci.sh
+
+      - name: Upload macOS app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Parquet-Spotlight-macos
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.sha256
+            release/size-report.txt
+            build/size-report.txt

@@ -18,6 +18,12 @@ public struct ParquetSemVer: Comparable {
         if raw.hasPrefix("v") || raw.hasPrefix("V") {
             raw.removeFirst()
         }
+        if let plus = raw.firstIndex(of: "+") {
+            raw = String(raw[..<plus])
+        }
+        if let dash = raw.firstIndex(of: "-") {
+            raw = String(raw[..<dash])
+        }
         let parts = raw.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3 else { return nil }
         guard

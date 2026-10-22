@@ -27,13 +27,14 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         var columns: [ColumnInfo] = []
         var partitionValuesByKey: [String: Set<String>] = [:]
         var truncated = false
+        var firstValidPath: String?
     }
 
     private struct ScanLimits {
         static let maxPartitionValuesPerKey = 25
     }
 
-    private struct PreviewSettings {
+    struct PreviewSettings {
         var expandDepth = 1
         var showAllColumns = true
         var maxColumns = 500
@@ -42,6 +43,9 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         var scanAllFiles = false
         var maxScanFiles = 500
         var recursiveScan = true
+        var previewRows = RowPreviewDefaults.showsRowPreviewByDefault
+        var maxPreviewRows = RowPreviewDefaults.defaultRowCount
+        var maxPreviewColumns = RowPreviewCaps.defaultColumns
     }
 
     private struct PreviewSettingsData: Codable {
@@ -53,6 +57,10 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         let scanAllFiles: Bool
         let maxScanFiles: Int
         let recursiveScan: Bool
+        let showRowPreview: Bool?
+        let previewRows: Bool?
+        let maxPreviewRows: Int?
+        let maxPreviewColumns: Int?
     }
 
     private final class ColumnTreeNode {
@@ -72,7 +80,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         }
     }
 
-    private struct DisplayRow {
+    struct DisplayRow {
         let id: Int
         let parentID: Int?
         let name: String
@@ -286,7 +294,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             html = renderHTML(path: path, metadata: metadata)
         }
 
-        let size = CGSize(width: 1100, height: 720)
+        let size = CGSize(width: 1200, height: 780)
         let reply = QLPreviewReply(dataOfContentType: .html, contentSize: size) { _ in
             return Data(html.utf8)
         }
@@ -298,7 +306,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         NSError(domain: "QLPreviewErrorDomain", code: 3, userInfo: nil)
     }
 
-    private func readMetadata(at url: URL) -> Metadata {
+    func readMetadata(at url: URL) -> Metadata {
         var out = Metadata()
 
         guard let fh = try? FileHandle(forReadingFrom: url) else {
@@ -341,7 +349,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         }
     }
 
-    private func readDatasetMetadata(at folderURL: URL, settings: PreviewSettings) -> DatasetMetadata? {
+    func readDatasetMetadata(at folderURL: URL, settings: PreviewSettings) -> DatasetMetadata? {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
         var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
@@ -391,6 +399,9 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
             dataset.validFileCount += 1
             dataset.totalRows += max(0, fileMetadata.rowCount)
+            if dataset.firstValidPath == nil || fileURL.path < (dataset.firstValidPath ?? "") {
+                dataset.firstValidPath = fileURL.path
+            }
 
             for col in fileMetadata.columns {
                 var types = typeMap[col.name] ?? Set<String>()
@@ -927,12 +938,13 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         return f.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
-    private func loadSettings() -> PreviewSettings {
+    func loadSettings() -> PreviewSettings {
         let settingsFile = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Application Support/ParquetPreview/settings.json")
+        var s = PreviewSettings()
         if let data = try? Data(contentsOf: settingsFile),
            let decoded = try? JSONDecoder().decode(PreviewSettingsData.self, from: data) {
-            return PreviewSettings(
+            s = PreviewSettings(
                 expandDepth: max(0, min(decoded.expandDepth, 10)),
                 showAllColumns: decoded.showAllColumns,
                 maxColumns: max(1, decoded.maxColumns),
@@ -940,32 +952,64 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                 hideListElement: decoded.hideListElement,
                 scanAllFiles: decoded.scanAllFiles,
                 maxScanFiles: max(1, decoded.maxScanFiles),
-                recursiveScan: decoded.recursiveScan
+                recursiveScan: decoded.recursiveScan,
+                previewRows: decoded.showRowPreview ?? decoded.previewRows ?? RowPreviewDefaults.showsRowPreviewByDefault,
+                maxPreviewRows: RowPreviewDefaults.snapRowCount(decoded.maxPreviewRows ?? RowPreviewDefaults.defaultRowCount),
+                maxPreviewColumns: clampPreviewColumns(decoded.maxPreviewColumns ?? RowPreviewCaps.defaultColumns)
             )
-        }
-
-        let defaults = UserDefaults(suiteName: "com.rkrug.parquetindexer.previewhost.preview") ?? .standard
-        var s = PreviewSettings()
-        if defaults.object(forKey: "expandDepth") != nil {
-            s.expandDepth = max(0, min(defaults.integer(forKey: "expandDepth"), 10))
-            s.showAllColumns = defaults.bool(forKey: "showAllColumns")
-            let maxCols = defaults.integer(forKey: "maxColumns")
-            s.maxColumns = maxCols > 0 ? maxCols : 500
-            s.showPhysicalType = defaults.bool(forKey: "showPhysicalType")
-            s.hideListElement = defaults.bool(forKey: "hideListElement")
-            s.scanAllFiles = defaults.bool(forKey: "scanAllFiles")
-            let maxScan = defaults.integer(forKey: "maxScanFiles")
-            s.maxScanFiles = maxScan > 0 ? maxScan : 500
-            if defaults.object(forKey: "recursiveScan") == nil {
-                s.recursiveScan = true
+        } else {
+            let defaults = UserDefaults(suiteName: "com.rkrug.parquetindexer.previewhost.preview") ?? .standard
+            if defaults.object(forKey: "expandDepth") != nil {
+                s.expandDepth = max(0, min(defaults.integer(forKey: "expandDepth"), 10))
+                s.showAllColumns = defaults.bool(forKey: "showAllColumns")
+                let maxCols = defaults.integer(forKey: "maxColumns")
+                s.maxColumns = maxCols > 0 ? maxCols : 500
+                s.showPhysicalType = defaults.bool(forKey: "showPhysicalType")
+                s.hideListElement = defaults.bool(forKey: "hideListElement")
+                s.scanAllFiles = defaults.bool(forKey: "scanAllFiles")
+                let maxScan = defaults.integer(forKey: "maxScanFiles")
+                s.maxScanFiles = maxScan > 0 ? maxScan : 500
+                if defaults.object(forKey: "recursiveScan") == nil {
+                    s.recursiveScan = true
+                } else {
+                    s.recursiveScan = defaults.bool(forKey: "recursiveScan")
+                }
+            }
+            if let flag = RowPreviewSettingsStore.readShowRowPreview(defaults) {
+                s.previewRows = flag
             } else {
-                s.recursiveScan = defaults.bool(forKey: "recursiveScan")
+                s.previewRows = RowPreviewDefaults.showsRowPreviewByDefault
+            }
+            if let storedRows = RowPreviewSettingsStore.readMaxRows(defaults) {
+                s.maxPreviewRows = storedRows
+            } else {
+                s.maxPreviewRows = RowPreviewDefaults.defaultRowCount
+            }
+            let previewColumns = defaults.integer(forKey: "maxPreviewColumns")
+            s.maxPreviewColumns = previewColumns > 0 ? clampPreviewColumns(previewColumns) : RowPreviewCaps.defaultColumns
+        }
+        // The app group wins when this extension can see it. Ad-hoc builds fall
+        // through to settings.json above, which the host writes into this container.
+        if let group = UserDefaults(suiteName: RowPreviewDefaults.appGroupID) {
+            if let flag = RowPreviewSettingsStore.readShowRowPreview(group) {
+                s.previewRows = flag
+            }
+            if let storedRows = RowPreviewSettingsStore.readMaxRows(group) {
+                s.maxPreviewRows = storedRows
             }
         }
         return s
     }
 
-    private func buildDisplayRows(columns: ArraySlice<ColumnInfo>, settings: PreviewSettings) -> [DisplayRow] {
+    private func clampPreviewRows(_ value: Int) -> Int {
+        max(1, min(value, Int(RowPreviewCaps.hardMaxRows)))
+    }
+
+    private func clampPreviewColumns(_ value: Int) -> Int {
+        max(1, min(value, Int(RowPreviewCaps.hardMaxColumns)))
+    }
+
+    func buildDisplayRows(columns: ArraySlice<ColumnInfo>, settings: PreviewSettings) -> [DisplayRow] {
         let root = ColumnTreeNode()
 
         for col in columns {
@@ -1087,95 +1131,33 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
         }
 
-        return """
-        <!doctype html>
-        <html>
-        <head>
-          <meta charset=\"utf-8\" />
-          <style>
-            body{font-family:-apple-system,system-ui,sans-serif;margin:18px;color:#1f2937;font-size:12px}
-            h1{font-size:20px;margin:0 0 10px}
-            .muted{color:#6b7280;font-size:12px}
-            .meta{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px;margin:14px 0}
-            .card{background:#f5f7fa;border:1px solid #dfe5ec;border-radius:8px;padding:10px}
-            .label{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
-            .val{font-size:16px;font-weight:600;margin-top:4px}
-            table{width:100%;border-collapse:collapse;font-size:12px}
-            th,td{padding:7px 8px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
-            th{background:#f8fafc;font-weight:600}
-            td.group{font-weight:600;color:#374151}
-            td.field{color:#1f2937}
-            tr.hidden{display:none}
-            .toggle{width:16px;height:16px;border:none;border-radius:3px;background:transparent;color:#475569;font-size:13px;line-height:14px;cursor:pointer;margin-right:6px;padding:0;vertical-align:middle}
-            .toggle:hover{background:#e5e7eb;color:#111827}
-            .spacer{display:inline-block;width:18px;margin-right:6px}
-          </style>
-          <script>
-            function childRows(id){
-              return Array.from(document.querySelectorAll('tr[data-parent="' + id + '"]'));
-            }
-            function collapseRec(id){
-              const btn=document.getElementById('btn-'+id);
-              if(btn){btn.dataset.expanded='false';btn.textContent='▸';}
-              childRows(id).forEach(function(row){
-                row.classList.add('hidden');
-                const cid=parseInt(row.id.replace('row-',''),10);
-                collapseRec(cid);
-              });
-            }
-            function toggleNode(id){
-              const btn=document.getElementById('btn-'+id);
-              if(!btn){return;}
-              const expanded=(btn.dataset.expanded==='true');
-              if(expanded){
-                collapseRec(id);
-                return;
-              }
-              btn.dataset.expanded='true';
-              btn.textContent='▾';
-              childRows(id).forEach(function(row){ row.classList.remove('hidden'); });
-            }
-            function expandToDepth(depth){
-              if(depth <= 0){ return; }
-              for(let d=0; d<depth; d++){
-                const current=Array.from(document.querySelectorAll('button.toggle[data-expanded=\"false\"]'));
-                if(current.length===0){ break; }
-                current.forEach(function(btn){
-                  const id=parseInt(btn.id.replace('btn-',''),10);
-                  const row=document.getElementById('row-'+id);
-                  if(!row){ return; }
-                  const parent=row.getAttribute('data-parent');
-                  if(parent){
-                    const prow=document.getElementById('row-'+parent);
-                    if(prow && prow.classList.contains('hidden')){ return; }
-                  }
-                  toggleNode(id);
-                });
-              }
-            }
-            window.addEventListener('DOMContentLoaded', function(){ expandToDepth(\(settings.expandDepth)); });
-          </script>
-        </head>
-        <body>
-          <h1>Parquet Quick Look</h1>
-          <div class=\"muted\">\(esc(path))</div>
-
-          <div class=\"meta\">
-            <div class=\"card\"><div class=\"label\">Valid</div><div class=\"val\">\(metadata.valid ? "Yes" : "No")</div></div>
-            <div class=\"card\"><div class=\"label\">File Size</div><div class=\"val\">\(esc(formatBytes(metadata.fileSize)))</div></div>
-            <div class=\"card\"><div class=\"label\">Footer</div><div class=\"val\">\(esc(formatBytes(UInt64(metadata.footerLength))))</div></div>
-            <div class=\"card\"><div class=\"label\">Rows</div><div class=\"val\">\(esc(formatInt(metadata.rowCount)))</div></div>
-            <div class=\"card\"><div class=\"label\">Columns</div><div class=\"val\">\(esc(formatInt(Int64(metadata.columns.count))))</div></div>
-          </div>
-
-          <table>
-            <thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead>
-            <tbody>\(rows)</tbody>
-          </table>
-        </body>
-        </html>
+        let schemaBody = """
+        <table>
+          <thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead>
+          <tbody>\(rows)</tbody>
+        </table>
         """
+        let cards = """
+        <div class="meta">
+          <div class="card"><div class="label">Valid</div><div class="val">\(metadata.valid ? "Yes" : "No")</div></div>
+          <div class="card"><div class="label">File Size</div><div class="val">\(esc(formatBytes(metadata.fileSize)))</div></div>
+          <div class="card"><div class="label">Footer</div><div class="val">\(esc(formatBytes(UInt64(metadata.footerLength))))</div></div>
+          <div class="card"><div class="label">Rows</div><div class="val">\(esc(formatInt(metadata.rowCount)))</div></div>
+          <div class="card"><div class="label">Columns</div><div class="val">\(esc(formatInt(Int64(metadata.columns.count))))</div></div>
+        </div>
+        """
+        let rowsSection = rowSection(path: path, valid: metadata.valid, settings: settings, sourceLabel: nil)
+        return renderShell(
+            title: "Parquet Quick Look",
+            path: path,
+            cards: cards,
+            bannerNote: "",
+            schemaBody: schemaBody,
+            rowsSection: rowsSection,
+            settings: settings
+        )
     }
+
 
     private func renderDatasetHTML(path: String, dataset: DatasetMetadata, settings: PreviewSettings) -> String {
         let showCount = settings.showAllColumns
@@ -1220,11 +1202,145 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             ? "<div class=\"muted\" style=\"margin:8px 0 0\">Scan truncated after \(settings.maxScanFiles) parquet files.</div>"
             : ""
 
+        let schemaBody = """
+        \(notes)
+        <h2>Hive Partitions</h2>
+        <table>
+          <thead><tr><th>Key</th><th>Values</th></tr></thead>
+          <tbody>\(partitionRows)</tbody>
+        </table>
+        <h2>Merged Schema</h2>
+        <table>
+          <thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead>
+          <tbody>\(schemaRows)</tbody>
+        </table>
+        """
+        let cards = """
+        <div class="meta">
+          <div class="card"><div class="label">Parquet Files</div><div class="val">\(esc(formatInt(Int64(dataset.fileCount))))</div></div>
+          <div class="card"><div class="label">Valid Files</div><div class="val">\(esc(formatInt(Int64(dataset.validFileCount))))</div></div>
+          <div class="card"><div class="label">Total Size</div><div class="val">\(esc(formatBytes(dataset.totalSize)))</div></div>
+          <div class="card"><div class="label">Rows (sum)</div><div class="val">\(esc(formatInt(dataset.totalRows)))</div></div>
+          <div class="card"><div class="label">Columns (merged)</div><div class="val">\(esc(formatInt(Int64(dataset.columns.count))))</div></div>
+        </div>
+        """
+        let sourceLabel: String?
+        if let first = dataset.firstValidPath {
+            sourceLabel = "Rows from \(URL(fileURLWithPath: first).lastPathComponent)"
+        } else {
+            sourceLabel = nil
+        }
+        let rowsSection = rowSection(
+            path: dataset.firstValidPath,
+            valid: dataset.firstValidPath != nil,
+            settings: settings,
+            sourceLabel: sourceLabel
+        )
+        return renderShell(
+            title: "Parquet Dataset Quick Look",
+            path: path,
+            cards: cards,
+            bannerNote: "",
+            schemaBody: schemaBody,
+            rowsSection: rowsSection,
+            settings: settings
+        )
+    }
+
+    private struct RowSection {
+        var enabled: Bool
+        var body: String
+        var error: String?
+        var preferRows: Bool
+    }
+
+    private func rowSection(path: String?, valid: Bool, settings: PreviewSettings, sourceLabel: String?) -> RowSection {
+        guard RowPreviewLogic.decodeRowLimit(showRowPreview: settings.previewRows, requested: settings.maxPreviewRows) != nil else {
+            return RowSection(enabled: false, body: "", error: nil, preferRows: false)
+        }
+        guard valid, let path, !path.isEmpty else {
+            let message = path == nil
+                ? "No readable Parquet file was found, so rows were not decoded."
+                : "This file does not look like a Parquet file, so rows were not decoded."
+            return RowSection(enabled: true, body: "", error: message, preferRows: false)
+        }
+        switch RowPreviewDecoder.read(
+            path: path,
+            maxRows: settings.maxPreviewRows,
+            maxColumns: settings.maxPreviewColumns
+        ) {
+        case .table(let table):
+            let source = sourceLabel.map { "<div class=\"muted\">\(esc($0))</div>" } ?? ""
+            return RowSection(
+                enabled: true,
+                body: source + RowPreviewHTML.tableHTML(table, footerNote: rowNote(table)),
+                error: nil,
+                preferRows: true
+            )
+        case .failed(let message):
+            return RowSection(enabled: true, body: "", error: message, preferRows: false)
+        }
+    }
+
+    private func rowNote(_ table: RowPreviewTable) -> String {
+        var parts: [String] = []
+        if table.shownRows == 0 {
+            parts.append("This file has no rows to show.")
+        } else if table.fileRows > Int64(table.shownRows) {
+            parts.append("Showing \(table.shownRows) of \(formatInt(table.fileRows)) rows.")
+        } else {
+            let noun = table.shownRows == 1 ? "row" : "rows"
+            parts.append("Showing \(table.shownRows) \(noun).")
+        }
+        if table.hiddenColumns > 0 {
+            parts.append("\(table.shownColumns) of \(table.totalColumns) columns shown. \(table.hiddenColumns) hidden.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func renderShell(
+        title: String,
+        path: String,
+        cards: String,
+        bannerNote: String,
+        schemaBody: String,
+        rowsSection: RowSection,
+        settings: PreviewSettings
+    ) -> String {
+        let defaultTab = rowsSection.preferRows ? "rows" : "schema"
+        let banner: String
+        if let error = rowsSection.error {
+            banner = "<div class=\"banner\">Row preview unavailable: \(esc(error)) Showing the schema instead.</div>"
+        } else if !bannerNote.isEmpty {
+            banner = bannerNote
+        } else {
+            banner = ""
+        }
+        let tabs = rowsSection.enabled
+        let tabButtons = tabs ? """
+        <div class="tabs">
+          <button type="button" class="tab\(defaultTab == "rows" ? " active" : "")" data-tab="rows" onclick="showTab('rows')">Rows</button>
+          <button type="button" class="tab\(defaultTab == "schema" ? " active" : "")" data-tab="schema" onclick="showTab('schema')">Schema</button>
+        </div>
+        """ : ""
+        let schemaClass = tabs ? "pane\(defaultTab == "schema" ? " active" : "")" : ""
+        let schemaPane = "<div id=\"pane-schema\" class=\"\(schemaClass)\">\(schemaBody)</div>"
+        let rowsPane: String
+        if tabs {
+            let rowsBody = rowsSection.error == nil
+                ? rowsSection.body
+                : "<p class=\"muted\">\(esc(rowsSection.error ?? ""))</p>"
+            let rowsClass = "pane\(defaultTab == "rows" ? " active" : "")"
+            rowsPane = "<div id=\"pane-rows\" class=\"\(rowsClass)\">\(rowsBody)</div>"
+        } else {
+            rowsPane = ""
+        }
+        let startup = tabs ? "showTab('\(defaultTab)');" : ""
         return """
         <!doctype html>
         <html>
         <head>
-          <meta charset=\"utf-8\" />
+          <meta charset="utf-8" />
           <style>
             body{font-family:-apple-system,system-ui,sans-serif;margin:18px;color:#1f2937;font-size:12px}
             h1{font-size:20px;margin:0 0 10px}
@@ -1236,13 +1352,26 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             .val{font-size:16px;font-weight:600;margin-top:4px}
             table{width:100%;border-collapse:collapse;font-size:12px}
             th,td{padding:7px 8px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}
-            th{background:#f8fafc;font-weight:600}
+            th{background:#f8fafc;font-weight:600;position:sticky;top:0}
             td.group{font-weight:600;color:#374151}
             td.field{color:#1f2937}
             tr.hidden{display:none}
             .toggle{width:16px;height:16px;border:none;border-radius:3px;background:transparent;color:#475569;font-size:13px;line-height:14px;cursor:pointer;margin-right:6px;padding:0;vertical-align:middle}
             .toggle:hover{background:#e5e7eb;color:#111827}
             .spacer{display:inline-block;width:18px;margin-right:6px}
+            .tabs{display:flex;gap:8px;margin:16px 0 10px}
+            .tab{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:4px 12px;font-size:12px;cursor:pointer;color:#374151}
+            .tab.active{background:#111827;color:#fff;border-color:#111827}
+            .pane{display:none}
+            .pane.active{display:block}
+            .note{margin:0 0 8px;color:#4b5563}
+            .banner{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:8px 10px;margin:10px 0}
+            .wrap{overflow:auto;max-height:560px;border:1px solid #e5e7eb;border-radius:8px}
+            table.grid td.cell, table.grid th{white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
+            td.null{color:#9a3412;font-style:italic;font-weight:600}
+            td.trunc{cursor:help;box-shadow:inset 0 -1px 0 #9ca3af}
+            .coltype{font-weight:400;color:#6b7280;font-size:10px}
+            td.rownum, th.rownum{color:#6b7280;width:1%}
           </style>
           <script>
             function childRows(id){
@@ -1269,7 +1398,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             function expandToDepth(depth){
               if(depth <= 0){ return; }
               for(let d=0; d<depth; d++){
-                const current=Array.from(document.querySelectorAll('button.toggle[data-expanded=\"false\"]'));
+                const current=Array.from(document.querySelectorAll('button.toggle[data-expanded="false"]'));
                 if(current.length===0){ break; }
                 current.forEach(function(btn){
                   const id=parseInt(btn.id.replace('btn-',''),10);
@@ -1284,33 +1413,25 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                 });
               }
             }
-            window.addEventListener('DOMContentLoaded', function(){ expandToDepth(\(settings.expandDepth)); });
+            function showTab(name){
+              document.querySelectorAll('.tab').forEach(function(btn){
+                btn.classList.toggle('active', btn.dataset.tab===name);
+              });
+              document.querySelectorAll('.pane').forEach(function(pane){
+                pane.classList.toggle('active', pane.id==='pane-'+name);
+              });
+            }
+            window.addEventListener('DOMContentLoaded', function(){ \(startup) expandToDepth(\(settings.expandDepth)); });
           </script>
         </head>
         <body>
-          <h1>Parquet Dataset Quick Look</h1>
-          <div class=\"muted\">\(esc(path))</div>
-
-          <div class=\"meta\">
-            <div class=\"card\"><div class=\"label\">Parquet Files</div><div class=\"val\">\(esc(formatInt(Int64(dataset.fileCount))))</div></div>
-            <div class=\"card\"><div class=\"label\">Valid Files</div><div class=\"val\">\(esc(formatInt(Int64(dataset.validFileCount))))</div></div>
-            <div class=\"card\"><div class=\"label\">Total Size</div><div class=\"val\">\(esc(formatBytes(dataset.totalSize)))</div></div>
-            <div class=\"card\"><div class=\"label\">Rows (sum)</div><div class=\"val\">\(esc(formatInt(dataset.totalRows)))</div></div>
-            <div class=\"card\"><div class=\"label\">Columns (merged)</div><div class=\"val\">\(esc(formatInt(Int64(dataset.columns.count))))</div></div>
-          </div>
-          \(notes)
-
-          <h2>Hive Partitions</h2>
-          <table>
-            <thead><tr><th>Key</th><th>Values</th></tr></thead>
-            <tbody>\(partitionRows)</tbody>
-          </table>
-
-          <h2>Merged Schema</h2>
-          <table>
-            <thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead>
-            <tbody>\(schemaRows)</tbody>
-          </table>
+          <h1>\(esc(title))</h1>
+          <div class="muted">\(esc(path))</div>
+          \(cards)
+          \(banner)
+          \(tabButtons)
+          \(schemaPane)
+          \(rowsPane)
         </body>
         </html>
         """

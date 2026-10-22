@@ -13,6 +13,7 @@ private enum AppEvents {
     static let manualUpdateCheck = Notification.Name("ManualUpdateCheck")
 }
 
+
 private enum SettingsKeys {
     // Use the preview extension bundle identifier as settings domain so the
     // sandboxed extension can read values reliably.
@@ -25,6 +26,9 @@ private enum SettingsKeys {
     static let scanAllFiles = "scanAllFiles"
     static let maxScanFiles = "maxScanFiles"
     static let recursiveScan = "recursiveScan"
+    static let previewRows = "previewRows"
+    static let maxPreviewRows = "maxPreviewRows"
+    static let maxPreviewColumns = "maxPreviewColumns"
     static let autoCheckUpdates = "autoCheckUpdates"
     static let updateCheckInterval = "updateCheckInterval"
     static let lastUpdateCheckAt = "lastUpdateCheckAt"
@@ -68,6 +72,10 @@ private struct PreviewSettingsData: Codable {
     let scanAllFiles: Bool
     let maxScanFiles: Int
     let recursiveScan: Bool
+    let showRowPreview: Bool?
+    let previewRows: Bool?
+    let maxPreviewRows: Int?
+    let maxPreviewColumns: Int?
 }
 
 private struct LiveSystemAccess: ParquetSystemAccess {
@@ -97,6 +105,9 @@ private final class AppModel: ObservableObject {
     @Published var scanAllFiles = false
     @Published var maxScanFiles = 500
     @Published var recursiveScan = true
+    @Published var previewRows = RowPreviewDefaults.showsRowPreviewByDefault
+    @Published var maxPreviewRows = RowPreviewDefaults.defaultRowCount
+    @Published var maxPreviewColumns = 50
     @Published var autoCheckUpdates = true
     @Published var updateCheckInterval: UpdateCheckInterval = .daily
     @Published private(set) var recentErrors: [String] = []
@@ -155,6 +166,9 @@ private final class AppModel: ObservableObject {
             scanAllFiles = decoded.scanAllFiles
             maxScanFiles = max(1, decoded.maxScanFiles)
             recursiveScan = decoded.recursiveScan
+            previewRows = decoded.showRowPreview ?? decoded.previewRows ?? RowPreviewDefaults.showsRowPreviewByDefault
+            maxPreviewRows = RowPreviewDefaults.snapRowCount(decoded.maxPreviewRows ?? RowPreviewDefaults.defaultRowCount)
+            maxPreviewColumns = clampPreviewColumns(decoded.maxPreviewColumns ?? RowPreviewDefaults.hardMaxColumns)
             return
         }
 
@@ -168,6 +182,9 @@ private final class AppModel: ObservableObject {
             defaults.set(false, forKey: SettingsKeys.scanAllFiles)
             defaults.set(500, forKey: SettingsKeys.maxScanFiles)
             defaults.set(true, forKey: SettingsKeys.recursiveScan)
+            defaults.set(RowPreviewDefaults.showsRowPreviewByDefault, forKey: SettingsKeys.previewRows)
+            defaults.set(RowPreviewDefaults.defaultRowCount, forKey: SettingsKeys.maxPreviewRows)
+            defaults.set(RowPreviewDefaults.hardMaxColumns, forKey: SettingsKeys.maxPreviewColumns)
         }
         if defaults.object(forKey: SettingsKeys.autoCheckUpdates) == nil {
             defaults.set(true, forKey: SettingsKeys.autoCheckUpdates)
@@ -189,6 +206,19 @@ private final class AppModel: ObservableObject {
         } else {
             recursiveScan = defaults.bool(forKey: SettingsKeys.recursiveScan)
         }
+        if let flag = RowPreviewSettingsStore.readShowRowPreview(defaults) {
+            previewRows = flag
+        } else {
+            previewRows = RowPreviewDefaults.showsRowPreviewByDefault
+        }
+        if let storedRows = RowPreviewSettingsStore.readMaxRows(defaults) {
+            maxPreviewRows = storedRows
+        } else {
+            maxPreviewRows = RowPreviewDefaults.defaultRowCount
+        }
+        let storedPreviewColumns = defaults.integer(forKey: SettingsKeys.maxPreviewColumns)
+        maxPreviewColumns = storedPreviewColumns > 0 ? clampPreviewColumns(storedPreviewColumns) : RowPreviewDefaults.hardMaxColumns
+        applySharedRowPreview()
         if defaults.object(forKey: SettingsKeys.autoCheckUpdates) == nil {
             autoCheckUpdates = true
         } else {
@@ -200,6 +230,20 @@ private final class AppModel: ObservableObject {
         } else {
             updateCheckInterval = .daily
         }
+    }
+
+    private func applySharedRowPreview() {
+        let group = UserDefaults(suiteName: RowPreviewDefaults.appGroupID)
+        if let flag = RowPreviewSettingsStore.readShowRowPreview(group) {
+            previewRows = flag
+        }
+        if let storedRows = RowPreviewSettingsStore.readMaxRows(group) {
+            maxPreviewRows = storedRows
+        }
+    }
+
+    private func clampPreviewColumns(_ value: Int) -> Int {
+        max(1, min(value, RowPreviewDefaults.hardMaxColumns))
     }
 
     func saveSettings() {
@@ -216,6 +260,13 @@ private final class AppModel: ObservableObject {
         defaults.set(scanAllFiles, forKey: SettingsKeys.scanAllFiles)
         defaults.set(normalizedMaxScanFiles, forKey: SettingsKeys.maxScanFiles)
         defaults.set(recursiveScan, forKey: SettingsKeys.recursiveScan)
+        let peekRows = RowPreviewDefaults.snapRowCount(maxPreviewRows)
+        maxPreviewRows = peekRows
+        defaults.set(previewRows, forKey: SettingsKeys.previewRows)
+        defaults.set(previewRows, forKey: RowPreviewDefaults.showRowPreviewKey)
+        defaults.set(peekRows, forKey: SettingsKeys.maxPreviewRows)
+        RowPreviewSettingsStore.write(showRowPreview: previewRows, maxRows: peekRows)
+        defaults.set(clampPreviewColumns(maxPreviewColumns), forKey: SettingsKeys.maxPreviewColumns)
         defaults.set(autoCheckUpdates, forKey: SettingsKeys.autoCheckUpdates)
         defaults.set(updateCheckInterval.rawValue, forKey: SettingsKeys.updateCheckInterval)
 
@@ -227,7 +278,11 @@ private final class AppModel: ObservableObject {
             hideListElement: hideListElement,
             scanAllFiles: scanAllFiles,
             maxScanFiles: normalizedMaxScanFiles,
-            recursiveScan: recursiveScan
+            recursiveScan: recursiveScan,
+            showRowPreview: previewRows,
+            previewRows: previewRows,
+            maxPreviewRows: RowPreviewDefaults.snapRowCount(maxPreviewRows),
+            maxPreviewColumns: clampPreviewColumns(maxPreviewColumns)
         )
         if let data = try? JSONEncoder().encode(payload) {
             let dir = previewContainerSettings.deletingLastPathComponent()
@@ -249,6 +304,9 @@ private final class AppModel: ObservableObject {
         scanAllFiles = false
         maxScanFiles = 500
         recursiveScan = true
+        previewRows = RowPreviewDefaults.showsRowPreviewByDefault
+        maxPreviewRows = RowPreviewDefaults.defaultRowCount
+        maxPreviewColumns = RowPreviewDefaults.hardMaxColumns
         autoCheckUpdates = true
         updateCheckInterval = .daily
         saveSettings()
@@ -698,6 +756,9 @@ private final class AppModel: ObservableObject {
         - scanAllFiles: \(scanAllFiles)
         - maxScanFiles: \(maxScanFiles)
         - recursiveScan: \(recursiveScan)
+        - previewRows: \(previewRows)
+        - maxPreviewRows: \(maxPreviewRows)
+        - maxPreviewColumns: \(maxPreviewColumns)
         - autoCheckUpdates: \(autoCheckUpdates)
         - updateCheckInterval: \(updateCheckInterval.rawValue)
 
@@ -978,6 +1039,37 @@ private struct ContentView: View {
                 .disabled(model.scanAllFiles)
 
                 Toggle("Recursive scan folders", isOn: $model.recursiveScan)
+            }
+
+            Section("Row Preview") {
+                Toggle("Show row preview", isOn: $model.previewRows)
+                Text("Reads rows inside the sandboxed Quick Look extension. The Spotlight importer stays metadata-only. Turn this off for the original schema-only preview.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Picker("Rows to peek", selection: $model.maxPreviewRows) {
+                    ForEach(RowPreviewDefaults.rowCountChoices, id: \.self) { count in
+                        Text("\(count)").tag(count)
+                    }
+                }
+                .disabled(!model.previewRows)
+
+                HStack {
+                    Text("Max columns")
+                        .foregroundStyle(model.previewRows ? .primary : .secondary)
+                    Spacer()
+                    Stepper(value: $model.maxPreviewColumns, in: 1...RowPreviewDefaults.hardMaxColumns, step: 5) { EmptyView() }
+                        .labelsHidden()
+                    Text("\(model.maxPreviewColumns)")
+                        .monospacedDigit()
+                        .frame(width: 48, alignment: .trailing)
+                        .foregroundStyle(model.previewRows ? .primary : .secondary)
+                }
+                .disabled(!model.previewRows)
+
+                Text("Choices are 10, 50, 100, 500, or 1000 rows. The same popup is in the preview. Decoding still stops after 2 seconds or 32 MB, and at 50 columns. The default is \(RowPreviewDefaults.showsRowPreviewByDefault ? "on" : "off") (`RowPreviewDefaults.showsRowPreviewByDefault`).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section {
