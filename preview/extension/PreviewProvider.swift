@@ -3,8 +3,11 @@ import Foundation
 import QuickLookUI
 import UniformTypeIdentifiers
 
+/// Metadata and the old HTML renderer. This is not a view controller and not
+/// the Quick Look principal class. A `QLPreviewProvider` instance inside the
+/// view-based preview fights the view service, so this type stays an NSObject.
 @objc(PreviewProvider)
-final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
+final class PreviewProvider: NSObject {
     struct ColumnInfo {
         let name: String
         let logicalType: String
@@ -942,8 +945,10 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         let settingsFile = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Application Support/ParquetPreview/settings.json")
         var s = PreviewSettings()
+        PreviewLog.stage("settings.load")
         if let data = try? Data(contentsOf: settingsFile),
            let decoded = try? JSONDecoder().decode(PreviewSettingsData.self, from: data) {
+            PreviewLog.stage("settings.json")
             s = PreviewSettings(
                 expandDepth: max(0, min(decoded.expandDepth, 10)),
                 showAllColumns: decoded.showAllColumns,
@@ -958,47 +963,37 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                 maxPreviewColumns: clampPreviewColumns(decoded.maxPreviewColumns ?? RowPreviewCaps.defaultColumns)
             )
         } else {
-            let defaults = UserDefaults(suiteName: "com.rkrug.parquetindexer.previewhost.preview") ?? .standard
-            if defaults.object(forKey: "expandDepth") != nil {
-                s.expandDepth = max(0, min(defaults.integer(forKey: "expandDepth"), 10))
-                s.showAllColumns = defaults.bool(forKey: "showAllColumns")
-                let maxCols = defaults.integer(forKey: "maxColumns")
-                s.maxColumns = maxCols > 0 ? maxCols : 500
-                s.showPhysicalType = defaults.bool(forKey: "showPhysicalType")
-                s.hideListElement = defaults.bool(forKey: "hideListElement")
-                s.scanAllFiles = defaults.bool(forKey: "scanAllFiles")
-                let maxScan = defaults.integer(forKey: "maxScanFiles")
-                s.maxScanFiles = maxScan > 0 ? maxScan : 500
-                if defaults.object(forKey: "recursiveScan") == nil {
-                    s.recursiveScan = true
-                } else {
-                    s.recursiveScan = defaults.bool(forKey: "recursiveScan")
-                }
-            }
-            if let flag = RowPreviewSettingsStore.readShowRowPreview(defaults) {
-                s.previewRows = flag
-            } else {
-                s.previewRows = RowPreviewDefaults.showsRowPreviewByDefault
-            }
-            if let storedRows = RowPreviewSettingsStore.readMaxRows(defaults) {
-                s.maxPreviewRows = storedRows
-            } else {
-                s.maxPreviewRows = RowPreviewDefaults.defaultRowCount
-            }
-            let previewColumns = defaults.integer(forKey: "maxPreviewColumns")
-            s.maxPreviewColumns = previewColumns > 0 ? clampPreviewColumns(previewColumns) : RowPreviewCaps.defaultColumns
+            // No settings file yet. Do not open a UserDefaults suite named with
+            // this extension's bundle id: Foundation rejects that and logs
+            // "Using your own bundle identifier as an NSUserDefaults suite name".
+            // Schema settings stay on PreviewSettings() until the host writes
+            // settings.json. Row preview stays on the named default constant.
+            PreviewLog.stage("settings.defaults")
         }
-        // The app group wins when this extension can see it. Ad-hoc builds fall
-        // through to settings.json above, which the host writes into this container.
-        if let group = UserDefaults(suiteName: RowPreviewDefaults.appGroupID) {
-            if let flag = RowPreviewSettingsStore.readShowRowPreview(group) {
-                s.previewRows = flag
-            }
-            if let storedRows = RowPreviewSettingsStore.readMaxRows(group) {
-                s.maxPreviewRows = storedRows
-            }
-        }
+        applyAppGroupSettings(&s)
         return s
+    }
+
+    /// Reads only `UserDefaults(suiteName: "group.com.rkrug.parquetindexer")`.
+    /// Does not call CFPreferences with kCFPreferencesAnyUser or ByHost.
+    private func applyAppGroupSettings(_ settings: inout PreviewSettings) {
+        var group: UserDefaults?
+        let failure = ParquetCatchException {
+            group = UserDefaults(suiteName: RowPreviewDefaults.appGroupID)
+        }
+        if let failure {
+            PreviewLog.error("settings.group \(failure.localizedDescription)")
+            return
+        }
+        guard let group else { return }
+        if let flag = RowPreviewSettingsStore.readShowRowPreview(group) {
+            settings.previewRows = flag
+            PreviewLog.stage("settings.group.show \(flag)")
+        }
+        if let storedRows = RowPreviewSettingsStore.readMaxRows(group) {
+            settings.maxPreviewRows = storedRows
+            PreviewLog.stage("settings.group.rows \(storedRows)")
+        }
     }
 
     private func clampPreviewRows(_ value: Int) -> Int {

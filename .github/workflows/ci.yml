@@ -20,6 +20,9 @@ jobs:
       - name: Run script, core, and row-preview tests
         run: ./scripts/test_scripts.sh
 
+      - name: Host the Quick Look view controller
+        run: ./scripts/test_preview_host.sh
+
       - name: Package DMG and zip
         run: ./scripts/package_ci.sh
 

@@ -81,4 +81,14 @@ func runRowPreviewLogicTests() {
     let elapsed = Date().timeIntervalSince(started)
     assertEqual(found, [999], "sort and filter find the matching row in a 1000 by 50 table")
     assertTrue(elapsed < 1, "sort and filter stay under a second at the row cap")
+
+    let nanWindow = RowPreviewLayout.clampedWindowSize(CGSize(width: .nan, height: .infinity))
+    assertEqual(nanWindow, RowPreviewLayout.schemaOnlySize, "non-finite window sizes fall back")
+    let tiny = RowPreviewLayout.clampedWindowSize(CGSize(width: 10, height: 10))
+    assertEqual(tiny, RowPreviewLayout.minimumSize, "tiny windows clamp up")
+    let huge = RowPreviewLayout.clampedWindowSize(CGSize(width: 100_000, height: 80_000))
+    assertEqual(huge, RowPreviewLayout.maximumSize, "huge windows clamp down")
+    let missingScreen = RowPreviewLayout.contentSize(columns: 40, rows: 100, visibleSize: CGSize(width: .nan, height: 0))
+    assertTrue(missingScreen.width >= RowPreviewLayout.minimumSize.width && missingScreen.width <= RowPreviewLayout.maximumSize.width, "a missing screen stays within width bounds")
+    assertTrue(missingScreen.height >= RowPreviewLayout.minimumSize.height && missingScreen.height <= RowPreviewLayout.maximumSize.height, "a missing screen stays within height bounds")
 }

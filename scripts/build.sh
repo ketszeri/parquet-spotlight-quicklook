@@ -99,6 +99,22 @@ clang \
   -c "$ROOT_DIR/preview/extension/NSExtensionMain.m" \
   -o "$BUILD_DIR/NSExtensionMain.o"
 
+clang \
+  -isysroot "$SDK_PATH" \
+  -mmacosx-version-min=12.0 \
+  -Wall -Wextra -Werror \
+  -O2 \
+  -c "$ROOT_DIR/preview/extension/PreviewException.m" \
+  -o "$BUILD_DIR/PreviewException.o"
+
+clang \
+  -isysroot "$SDK_PATH" \
+  -mmacosx-version-min=12.0 \
+  -Wall -Wextra -Werror \
+  -O2 \
+  -c "$ROOT_DIR/preview/extension/KeepPrincipal.m" \
+  -o "$BUILD_DIR/KeepPrincipal.o"
+
 # Row decoding is linked only into the Quick Look extension.
 if ! command -v cargo >/dev/null 2>&1; then
   echo "FAIL: cargo is required to build Quick Look row preview (install Rust from https://rustup.rs)" >&2
@@ -145,9 +161,12 @@ swiftc \
   -import-objc-header "$ROOT_DIR/preview/extension/ParquetPreview.h" \
   "$ROOT_DIR"/preview/shared/*.swift \
   "$ROOT_DIR/preview/extension/PreviewProvider.swift" \
+  "$ROOT_DIR/preview/extension/PreviewLog.swift" \
   "$ROOT_DIR/preview/extension/RowPreview.swift" \
   "$ROOT_DIR/preview/extension/ParquetPreviewController.swift" \
   "$BUILD_DIR/NSExtensionMain.o" \
+  "$BUILD_DIR/PreviewException.o" \
+  "$BUILD_DIR/KeepPrincipal.o" \
   "$ROW_PREVIEW_LIB" \
   -framework AppKit \
   -framework Foundation \

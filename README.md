@@ -39,13 +39,15 @@ The table:
 - sorts when a column header is clicked (ascending, descending, then off). Numbers and decimals sort numerically, dates and timestamps sort in time order, other values sort as text, and nulls stay last
 - filters from the search field and from the field under each column. Filtering and sorting use the rows already loaded
 
-The window size follows the visible frame of the screen Finder is on, minus a margin. A wide table uses that width. A narrow or short table stays compact. Quick Look does not report the destination screen, so the extension uses the screen of the focused window.
+The window size follows the visible frame of the screen Finder is on, minus a margin. A wide table uses that width. A narrow or short table stays compact. Quick Look does not report the destination screen, so the extension uses `NSScreen.main` when that call succeeds. If there is no screen, or the size is not a real display, the window is clamped between 420×280 and 4096×4096.
 
 The manager app's Quick Look settings include **Show row preview** and a row-count popup (`10`, `50`, `100`, `500`, `1000`). The same popup is in the preview. The default is the single constant `RowPreviewDefaults.showsRowPreviewByDefault` in `preview/shared/RowPreviewDefaults.swift`. This fork sets it to `true`. Upstream should set it to `false` so the schema-only preview stays the default until a user opts in. Turn the toggle off and Quick Look shows the schema only; the row decoder is not called.
 
 The extension is sandboxed and has no network entitlement. Row values stay in the Quick Look process. They are not written to the Spotlight index.
 
-The rows UI is an AppKit table inside a view-based `QLPreviewingController`. A data-based HTML reply does not run JavaScript in Finder, and `WKWebView` needs `com.apple.security.network.client` for its web process, which this extension does not request. Sort, filter, and the row popup are native controls. The schema tab is an outline of the same footer metadata.
+The rows UI is an AppKit table inside a view-based `QLPreviewingController`. A data-based HTML reply does not run JavaScript in Finder, and `WKWebView` needs `com.apple.security.network.client` for its web process, which this extension does not request. Sort, filter, and the row popup are native controls. The schema tab is an outline of the same footer metadata. The view is created in `loadView` and is not replaced afterwards. An exception while building the preview is caught, logged, and turned into a schema fallback; if that also fails, Quick Look receives the error. Stages are written with `os_log` subsystem `com.rkrug.parquetindexer`, category `preview`.
+
+The extension reads row-preview settings from `settings.json` in its container and from `UserDefaults(suiteName: "group.com.rkrug.parquetindexer")`. It does not use its own bundle identifier as a defaults suite, and it does not call Core Spotlight. The Spotlight importer remains footer-only.
 
 Decoding uses Apache Arrow's Rust [`parquet`](https://crates.io/crates/parquet) crate (arrow-rs 60, Apache-2.0) through a small C ABI, `libparquet_preview.a`, linked only into the Quick Look extension. See [Decoder choice](#decoder-choice) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

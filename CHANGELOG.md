@@ -21,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - Decode limits: 32 MiB read, 2 s wall time, 1000 rows, 50 columns. Errors and timeouts fall back to the schema view.
 - The rows UI is a native Quick Look view. Data-based HTML does not run the controls, and `WKWebView` would need a network entitlement this extension does not have.
 - CI on `macos-latest` builds the importer, extension, and app, runs the script and decoder tests, and uploads a DMG and zip.
+- The Quick Look view is built in `loadView`, and exceptions stay inside the extension. A failure falls back to a schema view instead of disconnecting Finder. Window size is clamped when no screen is available. Settings use the app-group suite `group.com.rkrug.parquetindexer`, not the extension bundle id.
 
 ## 0.4.2 - 2026-03-12
 

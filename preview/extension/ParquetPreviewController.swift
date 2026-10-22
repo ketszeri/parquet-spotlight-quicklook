@@ -13,19 +13,118 @@ import QuickLookUI
 /// preview resizes the table instead of leaving empty space under a fixed page.
 @objc(ParquetPreviewController)
 final class ParquetPreviewController: NSViewController, QLPreviewingController {
+    /// `rows`, `schema`, `schema-only`, `fallback`, or `idle`. The host test reads this.
+    @objc var previewPreparationStatus = "idle"
+    private var quickLookView: ParquetQuickLookView?
+
+    override func loadView() {
+        PreviewLog.stage("loadView")
+        let root = ParquetQuickLookView(frame: NSRect(origin: .zero, size: RowPreviewLayout.schemaOnlySize))
+        quickLookView = root
+        // Set the view only here. Replacing it later disconnects ViewBridge (Code=17).
+        view = root
+        preferredContentSize = RowPreviewLayout.clampedWindowSize(RowPreviewLayout.schemaOnlySize)
+    }
+
+    @objc(preparePreviewOfFileAtURL:completionHandler:)
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
+        PreviewLog.stage("prepare.begin \(url.lastPathComponent)")
+        let completion = PreviewCompletion(handler)
+        // Return before calling the handler so the view service is not re-entered.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                PreviewLog.error("prepare.released")
+                completion.finish(NSError(
+                    domain: "com.rkrug.parquetindexer.preview",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "The preview was released before it finished."]
+                ))
+                return
+            }
+            self.prepareOnMain(url: url, completion: completion)
+        }
+    }
+
+    private func prepareOnMain(url: URL, completion: PreviewCompletion) {
+        PreviewLog.stage("prepare.main")
+        var folderError: NSError?
+        let failure = ParquetCatchException {
+            NSApp.disableAutomaticTermination("Parquet Quick Look preview")
+            folderError = self.buildPreview(of: url)
+        }
+        if let failure {
+            PreviewLog.error("prepare.exception \(failure.localizedDescription)")
+            let fallback = ParquetCatchException {
+                self.installTextFallback(failure.localizedDescription)
+            }
+            if let fallback {
+                PreviewLog.error("prepare.fallback.failed \(fallback.localizedDescription)")
+                completion.finish(failure)
+                return
+            }
+            completion.finish(nil)
+            return
+        }
+        if let folderError {
+            PreviewLog.stage("prepare.folder.skip")
+            completion.finish(folderError)
+            return
+        }
+        PreviewLog.stage("prepare.ready \(self.previewPreparationStatus)")
+        completion.finish(nil)
+    }
+
+    private func buildPreview(of url: URL) -> NSError? {
+        let root = quickLookView ?? (view as? ParquetQuickLookView)
+        guard let root else {
+            installTextFallback("The preview view was not loaded.")
+            return nil
+        }
         let provider = PreviewProvider()
         let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         if isDirectory && provider.readDatasetMetadata(at: url, settings: provider.loadSettings()) == nil {
-            handler(NSError(domain: "QLPreviewErrorDomain", code: 3, userInfo: nil))
-            return
+            PreviewLog.stage("prepare.folder.empty")
+            return NSError(domain: "QLPreviewErrorDomain", code: 3, userInfo: nil)
         }
-        let root = ParquetQuickLookView(frame: NSRect(x: 0, y: 0, width: 960, height: 640))
-        view = root
-        root.configure(url: url, provider: provider)
-        preferredContentSize = root.previewSize
-        handler(nil)
+        let visible = visibleScreenSize()
+        let status = root.configure(url: url, provider: provider, visibleSize: visible)
+        previewPreparationStatus = status
+        preferredContentSize = RowPreviewLayout.clampedWindowSize(root.previewSize)
+        PreviewLog.stage("prepare.size \(Int(preferredContentSize.width))x\(Int(preferredContentSize.height))")
+        return nil
     }
+
+    /// `NSScreen` can throw or return nothing inside a Quick Look extension.
+    /// A bad size must not cross the Quick Look boundary.
+    private func visibleScreenSize() -> CGSize {
+        var size = RowPreviewLayout.fallbackVisibleSize
+        let failure = ParquetCatchException {
+            let screen = NSScreen.main ?? NSScreen.screens.first
+            size = RowPreviewLayout.clampedVisibleSize(screen?.visibleFrame.size ?? .zero)
+        }
+        if let failure {
+            PreviewLog.error("screen.unavailable \(failure.localizedDescription)")
+            return RowPreviewLayout.fallbackVisibleSize
+        }
+        PreviewLog.stage("screen \(Int(size.width))x\(Int(size.height))")
+        return size
+    }
+
+    private func installTextFallback(_ reason: String) {
+        PreviewLog.stage("prepare.fallback")
+        previewPreparationStatus = "fallback"
+        let text = "Schema preview unavailable: \(reason)"
+        if let root = quickLookView ?? (view as? ParquetQuickLookView) {
+            root.showFailureText(text)
+        } else if isViewLoaded {
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.frame = view.bounds
+            label.autoresizingMask = [.width, .height]
+            view.addSubview(label)
+        }
+        preferredContentSize = RowPreviewLayout.clampedWindowSize(RowPreviewLayout.schemaOnlySize)
+    }
+
 }
 
 final class SchemaNode: NSObject {
@@ -52,6 +151,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private var schemaRoots: [SchemaNode] = []
     private var expandDepth = 1
     private var showingRows = true
+    private var didExpand = false
+    private var adjustingTable = false
 
     private let rowsSegment = 0
     private let schemaSegment = 1
@@ -71,7 +172,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private(set) var previewSize = RowPreviewLayout.schemaOnlySize
 
-    func configure(url: URL, provider: PreviewProvider) {
+    func configure(url: URL, provider: PreviewProvider, visibleSize: CGSize) -> String {
         let settings = provider.loadSettings()
         expandDepth = settings.expandDepth
         let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
@@ -104,6 +205,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         query.peekCount = RowPreviewDefaults.snapRowCount(settings.maxPreviewRows)
 
         if rowsEnabled, let path = filePath, let limit = RowPreviewLogic.decodeRowLimit(showRowPreview: true, requested: query.peekCount) {
+            PreviewLog.stage("rows.decode")
             loadRows(path: path, limit: limit, sourceNote: sourceNote)
             rowCountForSize = max(1, min(query.peekCount, rows.count))
             columnCount = max(1, kinds.count)
@@ -115,20 +217,35 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         if !rowsEnabled {
             showingRows = false
             previewSize = RowPreviewLayout.schemaOnlySize
+            PreviewLog.stage("rows.skip")
         } else {
-            let screen = NSScreen.main ?? NSScreen.screens.first
-            let visible = screen?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
-            previewSize = RowPreviewLayout.contentSize(columns: max(kinds.count, columnCount), rows: rowCountForSize, visibleSize: visible)
+            previewSize = RowPreviewLayout.contentSize(columns: max(kinds.count, columnCount), rows: rowCountForSize, visibleSize: visibleSize)
             if !showingRows {
-                previewSize = RowPreviewLayout.contentSize(columns: columnCount, rows: 8, visibleSize: visible)
+                previewSize = RowPreviewLayout.contentSize(columns: columnCount, rows: 8, visibleSize: visibleSize)
             }
         }
 
+        PreviewLog.stage("ui.build")
         buildInterface(showRowControls: rowsEnabled)
+        PreviewLog.stage("ui.reload")
         reloadVisible()
         outline.reloadData()
-        expandSchema()
         show(rows: showingRows && rowsEnabled)
+        if rowsEnabled && showingRows {
+            return "rows"
+        }
+        if rowsEnabled {
+            return "schema"
+        }
+        return "schema-only"
+    }
+
+    func showFailureText(_ text: String) {
+        subviews.forEach { $0.removeFromSuperview() }
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.frame = NSRect(x: 12, y: 12, width: max(200, bounds.width - 24), height: max(40, bounds.height - 24))
+        label.autoresizingMask = [.width, .height]
+        addSubview(label)
     }
 
     private func loadRows(path: String, limit: Int, sourceNote: String?) {
@@ -384,12 +501,18 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func widenTable() {
+        guard !adjustingTable else { return }
+        adjustingTable = true
+        defer { adjustingTable = false }
         let width = table.tableColumns.reduce(CGFloat(0)) { $0 + $1.width }
-        var frame = table.frame
-        frame.size.width = max(width, tableScroll.contentView.bounds.width)
-        table.frame = frame
+        let needed = max(width, tableScroll.contentView.bounds.width)
+        if abs(table.frame.size.width - needed) > 1 {
+            var frame = table.frame
+            frame.size.width = needed
+            table.frame = frame
+        }
         var document = filterDocument.frame
-        document.size.width = frame.size.width
+        document.size.width = max(needed, document.size.width)
         document.size.height = 26
         filterDocument.frame = document
     }
@@ -403,10 +526,23 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
     }
 
-    override func layout() {
-        super.layout()
-        widenTable()
-        layoutFilterFields()
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        PreviewLog.stage("view.window")
+        if let failure = ParquetCatchException({
+            self.expandSchemaIfNeeded()
+            self.widenTable()
+            self.layoutFilterFields()
+        }) {
+            PreviewLog.error("view.window \(failure.localizedDescription)")
+        }
+    }
+
+    private func expandSchemaIfNeeded() {
+        guard !didExpand else { return }
+        didExpand = true
+        expandSchema()
     }
 
     private func persistPeekCount(_ count: Int) {
