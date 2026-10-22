@@ -106,5 +106,20 @@ if expected == "rows" {
         exit(1)
     }
     fputs("filter alignment ok\n", stderr)
+    viewController.perform(NSSelectorFromString("selectStatsTabForTest"))
+    let statsDeadline = Date().addingTimeInterval(12)
+    var statsStatus = ""
+    while Date() < statsDeadline {
+        statsStatus = viewController.value(forKey: "statsPreparationStatus") as? String ?? ""
+        if statsStatus == "ready" || statsStatus == "partial" || statsStatus == "failed" {
+            break
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    fputs("stats status=\(statsStatus)\n", stderr)
+    if statsStatus != "ready" && statsStatus != "partial" {
+        fputs("expected stats status ready or partial\n", stderr)
+        exit(1)
+    }
 }
 print("PASS: preview host \(status)")

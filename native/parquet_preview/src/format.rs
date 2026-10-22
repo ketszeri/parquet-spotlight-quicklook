@@ -623,7 +623,7 @@ fn format_decimal_digits(digits: &str, negative: bool, scale: i8) -> String {
     }
 }
 
-fn format_date32(days: i32) -> String {
+pub(crate) fn format_date32(days: i32) -> String {
     format_civil_date(i64::from(days))
 }
 
@@ -631,7 +631,7 @@ fn format_date64(millis: i64) -> String {
     format_civil_date(millis.div_euclid(86_400_000))
 }
 
-fn format_timestamp(ticks: i64, unit: TimeUnit) -> String {
+pub(crate) fn format_timestamp(ticks: i64, unit: TimeUnit) -> String {
     let (seconds, nanos) = match unit {
         TimeUnit::Second => (ticks, 0i64),
         TimeUnit::Millisecond => {

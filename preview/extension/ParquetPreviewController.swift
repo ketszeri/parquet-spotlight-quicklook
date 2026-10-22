@@ -129,6 +129,14 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
     @objc func exerciseFilterAlignmentForTest() -> NSNumber {
         (view as? ParquetQuickLookView)?.exerciseFilterAlignmentForTest() ?? 0
     }
+
+    @objc func selectStatsTabForTest() {
+        (view as? ParquetQuickLookView)?.selectStatsTabForTest()
+    }
+
+    @objc var statsPreparationStatus: String {
+        (view as? ParquetQuickLookView)?.statsStatus ?? "idle"
+    }
 }
 
 final class SchemaNode: NSObject {
@@ -162,6 +170,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private let rowsSegment = 0
     private let schemaSegment = 1
+    private let statsSegment = 2
+    private let statsPanel = StatsPanel()
     private let tabs = NSSegmentedControl()
     private let peekPopup = NSPopUpButton()
     private let search = NSSearchField()
@@ -311,10 +321,12 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private func buildInterface(showRowControls: Bool) {
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        tabs.segmentCount = 2
+        tabs.segmentCount = 3
         tabs.setLabel("Rows", forSegment: rowsSegment)
         tabs.setLabel("Schema", forSegment: schemaSegment)
-        tabs.selectedSegment = showingRows ? rowsSegment : schemaSegment
+        tabs.setLabel("Stats", forSegment: statsSegment)
+        tabs.setEnabled(showRowControls, forSegment: rowsSegment)
+        tabs.selectedSegment = showingRows && showRowControls ? rowsSegment : schemaSegment
         tabs.target = self
         tabs.action = #selector(tabChanged)
         peekPopup.removeAllItems()
@@ -389,7 +401,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         toolbar.spacing = 8
         toolbar.alignment = .centerY
         search.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        tabs.isHidden = !showRowControls
+        tabs.isHidden = false
         peekPopup.isHidden = !showRowControls
         search.isHidden = !showRowControls
 
@@ -407,8 +419,11 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         addSubview(content)
         content.addSubview(tableScroll)
         content.addSubview(outlineScroll)
+        content.addSubview(statsPanel)
+        statsPanel.isHidden = true
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
         outlineScroll.translatesAutoresizingMaskIntoConstraints = false
+        statsPanel.translatesAutoresizingMaskIntoConstraints = false
         filterScroll.translatesAutoresizingMaskIntoConstraints = false
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         banner.isHidden = banner.stringValue.isEmpty
@@ -437,7 +452,11 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             outlineScroll.topAnchor.constraint(equalTo: content.topAnchor),
             outlineScroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             outlineScroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            outlineScroll.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            outlineScroll.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            statsPanel.topAnchor.constraint(equalTo: content.topAnchor),
+            statsPanel.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            statsPanel.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            statsPanel.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
     }
 
@@ -458,18 +477,35 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func show(rows wantsRows: Bool) {
-        let rowsVisible = wantsRows && rowsEnabled
+        showTab(wantsRows && rowsEnabled ? rowsSegment : schemaSegment)
+    }
+
+    private func showTab(_ index: Int) {
+        let rowsVisible = index == rowsSegment && rowsEnabled
+        let statsVisible = index == statsSegment
         tableScroll.isHidden = !rowsVisible
         filterScroll.isHidden = !rowsVisible
-        outlineScroll.isHidden = rowsVisible
-        tabs.selectedSegment = rowsVisible ? rowsSegment : schemaSegment
+        statsPanel.isHidden = !statsVisible
+        outlineScroll.isHidden = rowsVisible || statsVisible
+        search.isHidden = !rowsVisible
+        note.isHidden = !rowsVisible
+        tabs.selectedSegment = rowsVisible ? rowsSegment : (statsVisible ? statsSegment : schemaSegment)
         if rowsVisible {
             layoutFilterFields()
+        }
+        if statsVisible {
+            statsPanel.start(path: filePath)
         }
     }
 
     @objc private func tabChanged() {
-        show(rows: tabs.selectedSegment == rowsSegment)
+        showTab(tabs.selectedSegment)
+    }
+
+    var statsStatus: String { statsPanel.status }
+
+    @objc func selectStatsTabForTest() {
+        showTab(statsSegment)
     }
 
     @objc private func peekChanged() {

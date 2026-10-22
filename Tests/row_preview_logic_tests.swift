@@ -91,4 +91,20 @@ func runRowPreviewLogicTests() {
     let missingScreen = RowPreviewLayout.contentSize(columns: 40, rows: 100, visibleSize: CGSize(width: CGFloat.nan, height: 0))
     assertTrue(missingScreen.width >= RowPreviewLayout.minimumSize.width && missingScreen.width <= RowPreviewLayout.maximumSize.width, "a missing screen stays within width bounds")
     assertTrue(missingScreen.height >= RowPreviewLayout.minimumSize.height && missingScreen.height <= RowPreviewLayout.maximumSize.height, "a missing screen stays within height bounds")
+
+    assertEqual(
+        ColumnStatsFormat.typeLabel(storage: "string", detected: "int", parsedPercent: 98.7),
+        "string → int (98.7% parsed)",
+        "stringly typed columns name the detected type and the parse rate"
+    )
+    assertEqual(ColumnStatsFormat.typeLabel(storage: "int64", detected: nil, parsedPercent: nil), "int64", "native columns keep their storage type")
+    assertEqual(ColumnStatsFormat.nullLabel(nulls: 12, percent: 4.5), "12 (4.5%)", "nulls include a percent")
+    assertEqual(ColumnStatsFormat.distinctLabel(distinct: 10, exact: true), "10", "exact distinct counts stay plain")
+    assertEqual(ColumnStatsFormat.distinctLabel(distinct: 2048, exact: false), "≥ 2048 (approximate)", "a capped distinct count is labelled approximate")
+    assertEqual(
+        ColumnStatsFormat.partialNote(scanned: 10, fileRows: 100),
+        "Stats other than footer min/max/nulls are based on the first 10 of 100 rows.",
+        "a partial scan says how many rows it used"
+    )
+    assertEqual(ColumnStatsFormat.topLabel([("alpha", 2), ("beta", 1)]), "alpha (2), beta (1)", "top values keep their counts")
 }

@@ -6,10 +6,12 @@
 mod budget;
 mod capped;
 mod decode;
+mod detect;
 mod error;
 mod format;
 mod limits;
 mod preflight;
+mod stats;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -18,11 +20,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use decode::{Preview, PreviewCell, PreviewColumn};
 pub use error::PreviewError;
 pub use limits::Limits;
+pub use stats::{stats_path, FileStats, StatsLimits};
 
 /// Read up to `limits` rows. Returns a short [`PreviewError`] instead of panicking.
 pub fn preview_path(path: &Path, limits: Limits) -> Result<Preview, PreviewError> {
@@ -117,6 +120,99 @@ pub unsafe extern "C" fn parquet_preview_read(
             Err(error) => failed(error),
         },
         Err(error) => failed(error),
+    }
+}
+
+/// Column statistics limits. A null pointer selects the defaults.
+#[repr(C)]
+pub struct parquet_preview_stats_limits {
+    pub max_columns: u32,
+    pub max_bytes: u64,
+    pub max_millis: u32,
+}
+
+/// Stream column statistics for `path`.
+///
+/// `cancel` may be null. When non-null, a non-zero value stops the scan and
+/// the returned JSON is marked partial if any rows were read.
+///
+/// # Safety
+/// `path` must be a valid C string. `limits` is null or readable.
+/// `cancel` is null or points at an `i32` that stays alive for the call.
+/// `out_json` and `out_error` are null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_preview_stats(
+    path: *const c_char,
+    limits: *const parquet_preview_stats_limits,
+    cancel: *mut i32,
+    out_json: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if !out_json.is_null() {
+        unsafe { *out_json = std::ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
+    let failed = |error: PreviewError| -> i32 {
+        write_c_string(out_error, error.message());
+        1
+    };
+    if path.is_null() {
+        return failed(PreviewError::Io);
+    }
+    let path = unsafe { CStr::from_ptr(path) };
+    let path = match path.to_str() {
+        Ok(path) => path,
+        Err(_) => return failed(PreviewError::Io),
+    };
+    let limits = if limits.is_null() {
+        StatsLimits::default()
+    } else {
+        let limits = unsafe { &*limits };
+        StatsLimits {
+            max_columns: limits.max_columns,
+            max_bytes: limits.max_bytes,
+            max_millis: limits.max_millis,
+        }
+    };
+    let backstop = Duration::from_millis(u64::from(limits.sanitized().max_millis.saturating_add(1_000)));
+    let flag = Arc::new(AtomicBool::new(false));
+    let flag_worker = Arc::clone(&flag);
+    let path = Path::new(path).to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| stats::stats_path(&path, limits, flag_worker)));
+        let _ = tx.send(result);
+    });
+    let started = Instant::now();
+    loop {
+        if !cancel.is_null() && unsafe { std::ptr::read_volatile(cancel) } != 0 {
+            flag.store(true, Ordering::Relaxed);
+        }
+        match rx.recv_timeout(Duration::from_millis(40)) {
+            Ok(Ok(Ok(stats))) => {
+                return match stats.to_json() {
+                    Ok(json) => {
+                        if write_c_string(out_json, &json) {
+                            0
+                        } else {
+                            failed(PreviewError::MemoryLimit)
+                        }
+                    }
+                    Err(error) => failed(error),
+                };
+            }
+            Ok(Ok(Err(error))) => return failed(error),
+            Ok(Err(_)) => return failed(PreviewError::Decode),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if started.elapsed() > backstop {
+                    flag.store(true, Ordering::Relaxed);
+                    return failed(PreviewError::Timeout);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return failed(PreviewError::Decode),
+        }
     }
 }
 

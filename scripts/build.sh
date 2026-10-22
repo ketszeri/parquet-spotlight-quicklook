@@ -164,6 +164,8 @@ swiftc \
   "$ROOT_DIR/preview/extension/PreviewLog.swift" \
   "$ROOT_DIR/preview/extension/RowPreview.swift" \
   "$ROOT_DIR/preview/extension/FilterFieldLayout.swift" \
+  "$ROOT_DIR/preview/extension/StatsDecoder.swift" \
+  "$ROOT_DIR/preview/extension/StatsPanel.swift" \
   "$ROOT_DIR/preview/extension/ParquetPreviewController.swift" \
   "$BUILD_DIR/NSExtensionMain.o" \
   "$BUILD_DIR/PreviewException.o" \

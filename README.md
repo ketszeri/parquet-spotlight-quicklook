@@ -75,6 +75,20 @@ Hard caps, enforced in the Rust library and mirrored by the Swift caller:
 
 A page header that claims a huge uncompressed size is rejected before the official decoder allocates it. Encrypted files and external column paths fail closed. A malformed file falls back to the schema view.
 
+## Stats view
+
+The preview's segmented control is **Rows / Schema / Stats**. Stats is available even when **Show row preview** is off. Choosing it does not change the Spotlight importer, which stays footer-only.
+
+Each column is one row: storage type, count, nulls with a percent, distinct count, min, max, mean, median, sample standard deviation, 25th and 75th percentiles, and the most common values for text. Percentiles use linear interpolation on the scanned values (`p * (n - 1)`). The standard deviation divides by `n - 1`.
+
+Parquet footer statistics supply whole-file min, max, and null count when every row group has them and the column is a single leaf. Mean, median, distinct, percentiles, and top values come from a streaming scan. The scan stops at 8 seconds, 256 MiB of bytes read, or 256 columns. If it stops early, the note says the other stats are based on the first N of M rows. Min and max from the footer stay whole-file. The scan runs off the main thread and is cancelled when the preview is released.
+
+### Stringly typed columns
+
+String and binary columns are inspected value by value. Empty and null cells are ignored. A type is chosen when at least 95% of the remaining values parse, using this order when more than one type qualifies: UUID, timestamp, date, decimal, integer, boolean. `0` and `1` stay integers. `true`/`false`/`yes`/`no` become booleans. Decimals accept both `.` and `,` as the decimal separator. A single separator is a decimal point (`1.234` is one and 234 thousandths, `1,50` is one and a half). Thousands separators need at least two groups (`1.234.567`, `1,234.50`, `1.234,50`). Dates accept `YYYY-MM-DD`, `DD.MM.YYYY`, `YYYY.MM.DD` with an optional trailing dot, and `MM/DD/YYYY`. A time (`HH:MM` or `HH:MM:SS`, optional fraction and `Z` or numeric offset, separated by `T` or a space) makes the value a timestamp. UUIDs are the hyphenated 8-4-4-4-12 form. The type line reads `string → int (98.7% parsed)`, and numeric or temporal stats use the parsed values. The unparsed count is the rest.
+
+Temporal min, max, mean, median, and percentiles are shown as dates or timestamps. Their standard deviation is a number of seconds.
+
 ## Prerequisites
 
 - **Minimum supported macOS version: 12.0 (Monterey).**

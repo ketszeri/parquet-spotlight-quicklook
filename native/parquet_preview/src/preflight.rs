@@ -37,8 +37,38 @@ pub fn preflight_row_groups<R: ChunkReader>(
             if uncompressed_total > HARD_MAX_UNCOMPRESSED {
                 return Err(PreviewError::MemoryLimit);
             }
-            check_column_chunk(reader, column)?;
+            check_column_chunk(reader, column, HARD_MAX_UNCOMPRESSED)?;
         }
+    }
+    Ok(())
+}
+
+/// Check one row group before streaming it. The cumulative cap applies only
+/// inside this group, so a later group can still be read after an earlier one.
+pub(crate) fn preflight_one_group<R: ChunkReader>(
+    reader: &R,
+    metadata: &ParquetMetaData,
+    group_index: usize,
+    root_columns: usize,
+    max_uncompressed: u64,
+    max_compressed_chunk: u64,
+) -> std::result::Result<(), PreviewError> {
+    let schema = metadata.file_metadata().schema_descr();
+    let group = metadata.row_group(group_index);
+    let mut uncompressed_total: u64 = 0;
+    for leaf in 0..group.num_columns() {
+        if schema.get_column_root_idx(leaf) >= root_columns {
+            continue;
+        }
+        let column = group.column(leaf);
+        if column.file_path().is_some() {
+            return Err(PreviewError::Decode);
+        }
+        uncompressed_total = uncompressed_total.saturating_add(nonnegative(column.uncompressed_size())?);
+        if uncompressed_total > max_uncompressed {
+            return Err(PreviewError::MemoryLimit);
+        }
+        check_column_chunk(reader, column, max_compressed_chunk)?;
     }
     Ok(())
 }
@@ -50,12 +80,13 @@ fn nonnegative(value: i64) -> std::result::Result<u64, PreviewError> {
 fn check_column_chunk<R: ChunkReader>(
     reader: &R,
     column: &ColumnChunkMetaData,
+    max_compressed: u64,
 ) -> std::result::Result<(), PreviewError> {
     let compressed = nonnegative(column.compressed_size())?;
     if compressed == 0 {
         return Ok(());
     }
-    if compressed > HARD_MAX_UNCOMPRESSED {
+    if compressed > max_compressed {
         return Err(PreviewError::MemoryLimit);
     }
     let start = column
@@ -64,7 +95,7 @@ fn check_column_chunk<R: ChunkReader>(
     let start = nonnegative(start)?;
     let length = usize::try_from(compressed).map_err(|_| PreviewError::Decode)?;
     let bytes = reader.get_bytes(start, length).map_err(map_reader_error)?;
-    walk_pages(&bytes)
+    walk_pages(&bytes, max_compressed)
 }
 
 fn map_reader_error(error: parquet::errors::ParquetError) -> PreviewError {
@@ -78,7 +109,7 @@ fn map_reader_error(error: parquet::errors::ParquetError) -> PreviewError {
     }
 }
 
-fn walk_pages(chunk: &[u8]) -> std::result::Result<(), PreviewError> {
+fn walk_pages(chunk: &[u8], max_uncompressed_sum: u64) -> std::result::Result<(), PreviewError> {
     let mut cursor = Cursor::new(chunk);
     let mut pages = 0usize;
     let mut uncompressed_sum: u64 = 0;
@@ -96,7 +127,7 @@ fn walk_pages(chunk: &[u8]) -> std::result::Result<(), PreviewError> {
             return Err(PreviewError::PageTooLarge);
         }
         uncompressed_sum = uncompressed_sum.saturating_add(uncompressed);
-        if uncompressed_sum > HARD_MAX_UNCOMPRESSED {
+        if uncompressed_sum > max_uncompressed_sum {
             return Err(PreviewError::MemoryLimit);
         }
         let compressed = usize::try_from(compressed).map_err(|_| PreviewError::Decode)?;

@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use std::sync::{atomic::AtomicBool, Arc};
+
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet_preview::{preview_path, Limits, PreviewError};
+use parquet_preview::{preview_path, stats_path, Limits, PreviewError, StatsLimits};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -206,6 +208,78 @@ fn caller_cannot_raise_the_hard_caps() {
     assert_eq!(table.file_rows, 1_200);
     assert_eq!(table.shown_rows, 1_000);
     assert_eq!(table.cell("n", 999).unwrap().text.as_deref(), Some("999"));
+}
+
+#[test]
+fn stats_use_footer_and_scanned_values() {
+    let stats = stats_path(
+        &fixture("snappy.parquet"),
+        StatsLimits::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    assert!(!stats.partial);
+    assert_eq!(stats.file_rows, 3);
+    assert_eq!(stats.scanned_rows, 3);
+    let id = stats.columns.iter().find(|column| column.name == "id").unwrap();
+    assert_eq!(id.count, 3);
+    assert_eq!(id.nulls, 0);
+    assert_eq!(id.min.as_deref(), Some("0"));
+    assert_eq!(id.max.as_deref(), Some("2"));
+    assert_eq!(id.distinct, Some(3));
+    assert!(id.distinct_exact);
+    assert!(id.detected.is_none());
+    let label = stats.columns.iter().find(|column| column.name == "label").unwrap();
+    assert_eq!(label.nulls, 1);
+    assert_eq!(label.nulls_scope, "footer");
+    assert_eq!(label.count, 2);
+    assert!(label.top.iter().any(|item| item.value == "alpha" && item.count == 1));
+
+    let nested = stats_path(
+        &fixture("nested_types.parquet"),
+        StatsLimits::default(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap();
+    let amount = nested.columns.iter().find(|column| column.name == "amount").unwrap();
+    assert_eq!(amount.min.as_deref(), Some("-0.01"));
+    assert_eq!(amount.max.as_deref(), Some("12.5"));
+    let event = nested.columns.iter().find(|column| column.name == "event_date").unwrap();
+    assert_eq!(event.min.as_deref(), Some("1970-01-01"));
+    assert_eq!(event.max.as_deref(), Some("2020-01-02"));
+    assert!(event.temporal);
+}
+
+#[test]
+fn stringly_typed_column_is_detected_while_scanning() {
+    let dir = std::env::temp_dir().join(format!("parquet-stats-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("strings.parquet");
+    let mut values = Vec::new();
+    for index in 0..96 {
+        values.push(Some(format!("{index}")));
+    }
+    values.extend([Some("nope".to_string()), Some("nope".to_string()), Some("nope".to_string()), Some("nope".to_string())]);
+    let array = arrow_array::StringArray::from(values);
+    let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "code",
+        arrow_schema::DataType::Utf8,
+        true,
+    )]));
+    let batch = arrow_array::RecordBatch::try_new(schema.clone(), vec![std::sync::Arc::new(array)]).unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let stats = stats_path(&path, StatsLimits::default(), Arc::new(AtomicBool::new(false))).unwrap();
+    let column = &stats.columns[0];
+    assert_eq!(column.detected.as_deref(), Some("int"));
+    assert!((column.parsed_percent.unwrap() - 96.0).abs() < 0.05);
+    assert_eq!(column.unparsed, 4);
+    assert_eq!(column.min.as_deref(), Some("0"));
+    assert_eq!(column.max.as_deref(), Some("95"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
