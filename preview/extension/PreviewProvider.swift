@@ -117,7 +117,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
 
     private struct CompactParser {
         // Valid footers nest only a handful of levels deep.
-        static let maxDepth = 100
+        static let maxDepth = ParquetParserBounds.maxDepth
 
         private let bytes: [UInt8]
         private(set) var index: Int = 0
@@ -128,7 +128,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
 
         init(data: Data) {
             self.bytes = [UInt8](data)
-            self.maxSkips = 8 * self.bytes.count + 100_000
+            self.maxSkips = ParquetParserBounds.maxSkips(forInputBytes: self.bytes.count)
         }
 
         var remaining: Int { bytes.count - index }
@@ -136,7 +136,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         // Every encoded element occupies at least one byte, so a declared count can never
         // legitimately exceed the bytes left to parse.
         func boundedCount(_ declared: Int) -> Int {
-            declared <= 0 ? 0 : min(declared, remaining)
+            ParquetParserBounds.boundedCount(declared: declared, remaining: remaining)
         }
 
         mutating func readByte() throws -> UInt8 {
@@ -395,8 +395,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
 
             if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                let (sum, overflow) = dataset.totalSize.addingReportingOverflow(UInt64(size))
-                dataset.totalSize = overflow ? UInt64.max : sum
+                dataset.totalSize = ParquetParserBounds.saturatingAdd(dataset.totalSize, UInt64(size))
             }
 
             parsePartitionSegments(from: fileURL, baseFolder: folderURL) { key, value in
@@ -412,8 +411,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                 continue
             }
             dataset.validFileCount += 1
-            let (rows, overflow) = dataset.totalRows.addingReportingOverflow(max(0, fileMetadata.rowCount))
-            dataset.totalRows = overflow ? Int64.max : rows
+            dataset.totalRows = ParquetParserBounds.saturatingAdd(dataset.totalRows, max(0, fileMetadata.rowCount))
 
             for col in fileMetadata.columns {
                 var types = typeMap[col.name] ?? Set<String>()
@@ -762,8 +760,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         var total: Int64 = 0
         for _ in 0..<size {
             let rows = try parseRowGroup(parser: &parser)
-            let (sum, overflow) = total.addingReportingOverflow(rows)
-            total = overflow ? Int64.max : sum
+            total = ParquetParserBounds.saturatingAdd(total, rows)
         }
         return max(0, total)
     }
