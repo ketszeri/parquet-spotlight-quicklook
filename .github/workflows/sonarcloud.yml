@@ -83,15 +83,10 @@ jobs:
 
       - name: Install Rust for the preview crate
         if: hashFiles('native/parquet_preview/Cargo.toml') != ''
-        run: |
-          set -euo pipefail
-          if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
-            curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
-          fi
-          # shellcheck disable=SC1091
-          source "$HOME/.cargo/env"
-          rustup component add clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy
 
       - name: Install Build Wrapper
         id: build-wrapper
