@@ -133,21 +133,48 @@ jobs:
               data = json.load(open(path))
           except FileNotFoundError:
               sys.exit(f"missing {path}")
-          # Build Wrapper can record the same translation unit more than once.
-          # Keep the fullest command for each file so the indexer sees it once.
+          def command_text(entry):
+              args = entry.get("arguments")
+              if isinstance(args, list) and args:
+                  return " ".join(str(part) for part in args)
+              return str(entry.get("command") or "")
+
+          def is_internal_cc1(entry):
+              args = entry.get("arguments")
+              if isinstance(args, list) and "-cc1" in args:
+                  return True
+              return " -cc1" in command_text(entry)
+
+          def driver_score(entry):
+              text = f" {command_text(entry)} "
+              score = 0
+              if " -c " in text:
+                  score += 10
+              if " -bundle " in text:
+                  score += 5
+              if " -E " in text:
+                  score -= 20
+              return score
+
+          # Build Wrapper also records clang -cc1 frontend invocations. Those are
+          # not supported compilation units, and they are longer than the driver
+          # command, so keep one driver command per file.
+          drivers = [entry for entry in data if not is_internal_cc1(entry)]
+          pool = drivers or data
           best = {}
-          for entry in data:
+          for entry in pool:
               filename = entry.get("file", "")
-              command = entry.get("command") or " ".join(entry.get("arguments") or [])
               previous = best.get(filename)
-              if previous is None or len(command) > len(previous[0]):
-                  best[filename] = (command, entry)
-          deduped = [item[1] for item in best.values()]
+              if previous is None or driver_score(entry) > driver_score(previous):
+                  best[filename] = entry
+          deduped = [best[name] for name in sorted(best)]
           with open(path, "w") as handle:
               json.dump(deduped, handle)
-          print(f"compilation database entries: {len(data)} raw, {len(deduped)} files")
-          for filename in sorted(best):
+          print(f"compilation database entries: {len(data)} raw, {len(deduped)} driver files")
+          for filename, entry in best.items():
+              text = command_text(entry)
               print(f"  {filename}")
+              print(f"    {text[:240]}")
           if not deduped:
               sys.exit("compilation database is empty")
           PY
