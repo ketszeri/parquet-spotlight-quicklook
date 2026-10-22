@@ -614,7 +614,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         return rows[source][index].text ?? "null"
     }
 
-    func tableView(_ tableView: NSTableView, willDisplay cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
         guard let text = cell as? NSTextFieldCell else { return }
         let nullCell = isNull(row: row, column: tableColumn)
         text.textColor = nullCell ? .systemOrange : .labelColor

@@ -112,10 +112,17 @@ swiftc \
 codesign -s - -f --timestamp=none "$HOST"
 
 export PARQUET_PREVIEW_LOG=1
-HOME_ROWS="$(mktemp -d)"
-HOME_OFF="$(mktemp -d)"
-mkdir -p "$HOME_OFF/Library/Application Support/ParquetPreview"
-cat > "$HOME_OFF/Library/Application Support/ParquetPreview/settings.json" <<'EOF'
+# NSHomeDirectory() follows the account home, not a temporary HOME, so the
+# settings file has to live where the host process will actually look.
+SETTINGS_DIR="$HOME/Library/Application Support/ParquetPreview"
+rm -rf "$SETTINGS_DIR"
+
+echo "==> Host the view controller for a real fixture"
+PARQUET_PROBE_APPEX="$APPEX" \
+  "$HOST" "$BUNDLE_DIR" "$FIXTURE" rows
+
+mkdir -p "$SETTINGS_DIR"
+cat > "$SETTINGS_DIR/settings.json" <<'EOF'
 {
   "expandDepth": 1,
   "showAllColumns": true,
@@ -132,13 +139,8 @@ cat > "$HOME_OFF/Library/Application Support/ParquetPreview/settings.json" <<'EO
 }
 EOF
 
-echo "==> Host the view controller for a real fixture"
-PARQUET_PROBE_APPEX="$APPEX" \
-  HOME="$HOME_ROWS" \
-  "$HOST" "$BUNDLE_DIR" "$FIXTURE" rows
-
 echo "==> Host the view controller with row preview switched off"
-HOME="$HOME_OFF" \
-  "$HOST" "$BUNDLE_DIR" "$FIXTURE" schema-only
+"$HOST" "$BUNDLE_DIR" "$FIXTURE" schema-only
+rm -rf "$SETTINGS_DIR"
 
 echo "PASS: preview host"
