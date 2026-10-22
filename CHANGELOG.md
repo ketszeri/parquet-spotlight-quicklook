@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - The Quick Look view is built in `loadView`, and exceptions stay inside the extension. A failure falls back to a schema view instead of disconnecting Finder. Window size is clamped when no screen is available. Settings use the app-group suite `group.com.rkrug.parquetindexer`, not the extension bundle id.
 - Per-column filter fields use the table's column rects, so they stay aligned when a column is resized, reordered, hidden, or scrolled horizontally.
 - Added a Stats view next to Schema and Rows. It shows count, nulls, distinct, min, max, mean, median, stddev, and quartiles per column, plus top values for text. String columns that parse as integers, decimals, booleans, dates, timestamps, or UUIDs (at least 95% of non-empty values) are summarised as that type. The scan streams the file under its own time and byte budget and says when the result is partial. Parquet footer min/max/null counts are used when they describe the stored values.
+- Added Save as Excel for the whole file or the current rows view. The workbook uses typed cells, a frozen header, and an autofilter. Files past Excel's row limit are split across sheets, and the preview says so before writing. Text that starts with `=`, `+`, `-`, or `@` is prefixed so it is not a formula. The sandboxed extension writes the file into its container and the host app shows the save panel.
 
 ## 0.4.2 - 2026-03-12
 

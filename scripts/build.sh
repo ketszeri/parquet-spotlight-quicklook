@@ -79,10 +79,12 @@ swiftc \
   -O \
   "$ROOT_DIR"/Sources/ParquetCore/*.swift \
   "$ROOT_DIR"/preview/shared/*.swift \
+  "$ROOT_DIR/preview/app/ExcelSave.swift" \
   "$ROOT_DIR/preview/app/AppMain.swift" \
   -framework AppKit \
   -framework Foundation \
   -framework SwiftUI \
+  -framework UniformTypeIdentifiers \
   -o "$APP_MACOS_DIR/ParquetQuickLookAndIndex"
 
 cp "$ROOT_DIR/preview/app/Info.plist" "$APP_CONTENTS_DIR/Info.plist"
@@ -166,6 +168,7 @@ swiftc \
   "$ROOT_DIR/preview/extension/FilterFieldLayout.swift" \
   "$ROOT_DIR/preview/extension/StatsDecoder.swift" \
   "$ROOT_DIR/preview/extension/StatsPanel.swift" \
+  "$ROOT_DIR/preview/extension/ExcelExport.swift" \
   "$ROOT_DIR/preview/extension/ParquetPreviewController.swift" \
   "$BUILD_DIR/NSExtensionMain.o" \
   "$BUILD_DIR/PreviewException.o" \
@@ -185,15 +188,59 @@ swiftc \
 mkdir -p "$APP_RESOURCES_DIR/Licenses"
 cp "$ROOT_DIR/licenses/apache-arrow-LICENSE.txt" "$APP_RESOURCES_DIR/Licenses/apache-arrow-LICENSE.txt"
 cp "$ROOT_DIR/licenses/apache-arrow-NOTICE.txt" "$APP_RESOURCES_DIR/Licenses/apache-arrow-NOTICE.txt"
+cp "$ROOT_DIR/licenses/rust_xlsxwriter-LICENSE-MIT.txt" "$APP_RESOURCES_DIR/Licenses/rust_xlsxwriter-LICENSE-MIT.txt"
+cp "$ROOT_DIR/licenses/rust_xlsxwriter-LICENSE-Apache-2.0.txt" "$APP_RESOURCES_DIR/Licenses/rust_xlsxwriter-LICENSE-Apache-2.0.txt"
 cp "$ROOT_DIR/LICENSE" "$APP_RESOURCES_DIR/Licenses/MIT-LICENSE.txt"
 
 STATIC_BYTES="$(stat -f%z "$ROW_PREVIEW_LIB")"
 APPEX_BYTES="$(stat -f%z "$APPEX_MACOS_DIR/ParquetQuickLookExtension")"
 IMPORTER_BYTES="$(stat -f%z "$MD_MACOS_DIR/ParquetImporter")"
+XLSX_SYMBOL_BYTES=0
+STATS_SYMBOL_BYTES=0
+if nm -print-size "$ROW_PREVIEW_LIB" > "$BUILD_DIR/nm-preview.txt" 2>/dev/null; then
+  XLSX_SYMBOL_BYTES="$(python3 - "$BUILD_DIR/nm-preview.txt" xlsx <<'PY'
+import sys
+total = 0
+pattern = sys.argv[2].lower()
+for line in open(sys.argv[1], errors="replace"):
+    parts = line.split()
+    if len(parts) < 4:
+        continue
+    size, name = parts[1], parts[-1].lower()
+    if pattern not in name:
+        continue
+    if not all(c in "0123456789abcdefABCDEF" for c in size):
+        continue
+    total += int(size, 16)
+print(total)
+PY
+)" || XLSX_SYMBOL_BYTES=0
+  STATS_SYMBOL_BYTES="$(python3 - "$BUILD_DIR/nm-preview.txt" 'stats|detect' <<'PY'
+import sys
+total = 0
+patterns = sys.argv[2].lower().split("|")
+for line in open(sys.argv[1], errors="replace"):
+    parts = line.split()
+    if len(parts) < 4:
+        continue
+    size, name = parts[1], parts[-1].lower()
+    if not any(pattern in name for pattern in patterns):
+        continue
+    if "xlsx" in name:
+        continue
+    if not all(c in "0123456789abcdefABCDEF" for c in size):
+        continue
+    total += int(size, 16)
+print(total)
+PY
+)" || STATS_SYMBOL_BYTES=0
+fi
 cat > "$BUILD_DIR/size-report.txt" <<EOF
 staticlib_bytes=$STATIC_BYTES
 appex_executable_bytes=$APPEX_BYTES
 importer_executable_bytes=$IMPORTER_BYTES
+xlsx_symbol_bytes=$XLSX_SYMBOL_BYTES
+stats_symbol_bytes=$STATS_SYMBOL_BYTES
 rust_targets=$RUST_TARGETS
 EOF
 echo "Row preview static library: $STATIC_BYTES bytes"

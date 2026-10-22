@@ -1140,6 +1140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.window = window
 
         setupMenu()
+        ExcelSave.install()
+        ExcelSave.presentPending()
         DispatchQueue.main.async { [weak self] in
             self?.model.autoInstallImporterIfMissing()
             self?.model.autoCheckForUpdatesIfNeeded()
@@ -1148,6 +1150,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            ExcelSave.handle(url: url)
+        }
+        showMainWindow()
     }
 
     @objc private func openSettings(_ sender: Any?) {

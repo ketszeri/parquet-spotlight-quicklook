@@ -107,4 +107,35 @@ func runRowPreviewLogicTests() {
         "a partial scan says how many rows it used"
     )
     assertEqual(ColumnStatsFormat.topLabel([("alpha", 2), ("beta", 1)]), "alpha (2), beta (1)", "top values keep their counts")
+
+    let exportID = "550E8400-E29B-41D4-A716-446655440000"
+    assertTrue(ExcelHandoff.isExportID(exportID), "a UUID is an export id")
+    assertTrue(!ExcelHandoff.isExportID("../etc/passwd"), "a path is not an export id")
+    assertTrue(!ExcelHandoff.isExportID(exportID + ".xlsx"), "an extension is not an export id")
+    let exports = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("excel-handoff-test", isDirectory: true)
+    let staged = ExcelHandoff.containedFile(directory: exports, id: exportID, ext: "xlsx")
+    assertEqual(staged?.lastPathComponent ?? "", "\(exportID).xlsx", "the staged file keeps the UUID name")
+    assertTrue(ExcelHandoff.containedFile(directory: exports, id: "../etc/passwd", ext: "xlsx") == nil, "a non-UUID cannot leave the exports directory")
+    assertTrue(ExcelHandoff.containedFile(directory: exports, id: exportID, ext: "txt") == nil, "only xlsx and json are staged")
+    let exportURL = ExcelHandoff.exportURL(id: exportID)
+    assertEqual(exportURL?.scheme, "parquetquicklook", "the handoff URL uses the host scheme")
+    assertEqual(exportURL.flatMap(ExcelHandoff.id(from:)) ?? "", exportID, "the handoff URL round-trips the id")
+    assertTrue(ExcelHandoff.id(from: URL(string: "parquetquicklook://export?id=../x")!) == nil, "a bad id is ignored")
+    assertEqual(ExcelHandoff.suggestedName(sourcePath: "/tmp/snappy.parquet", mode: "file"), "snappy.xlsx", "the whole file keeps the source name")
+    assertEqual(ExcelHandoff.suggestedName(sourcePath: "/tmp/snappy.parquet", mode: "view"), "snappy-rows.xlsx", "the rows view names itself apart from the whole file")
+    let limit = ExcelHandoff.limitNote(rows: 2_000_000, sheets: 2, truncatedColumns: 3)
+    assertTrue(limit.contains("2 sheets"), "a long file says it will use more than one sheet")
+    assertTrue(limit.contains("3 columns"), "extra columns are called out before export")
+    let view = ExcelHandoff.viewJSON(
+        columns: [(name: "id", type: "int64"), (name: "note", type: "string")],
+        rows: [["2", "=1+1"], [nil, "alpha"]],
+        order: [1, 0]
+    )
+    let viewObject = view.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    let viewColumns = viewObject?["columns"] as? [[String: String]]
+    let viewRows = viewObject?["rows"] as? [[Any]]
+    assertEqual(viewColumns?.first?["name"] ?? "", "note", "the rows view export follows visual column order")
+    assertEqual(viewRows?.first?.first as? String ?? "", "=1+1", "the exported cell keeps the displayed text")
+    let lastRow = viewRows?.last ?? []
+    assertTrue(lastRow.contains { $0 is NSNull }, "a null cell stays null in the export")
 }

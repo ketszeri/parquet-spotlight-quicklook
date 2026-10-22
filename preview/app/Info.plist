@@ -26,5 +26,16 @@
   <string>12.0</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.rkrug.parquetindexer.export</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>parquetquicklook</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

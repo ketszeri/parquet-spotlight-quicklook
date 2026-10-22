@@ -28,6 +28,44 @@ typedef struct parquet_preview_stats_limits {
     uint32_t max_millis;
 } parquet_preview_stats_limits;
 
+/* Field order matches the Rust `parquet_preview_export_plan` struct. */
+typedef struct parquet_preview_export_plan {
+    int64_t rows;
+    uint32_t columns;
+    uint32_t sheets;
+    uint32_t truncated_columns;
+} parquet_preview_export_plan;
+
+/* Field order matches the Rust `ExportProgress` struct. */
+typedef struct parquet_preview_export_progress {
+    uint64_t rows_written;
+    uint64_t rows_total;
+    int32_t cancel;
+} parquet_preview_export_progress;
+
+/* 0 on success. Reads the footer only. */
+int32_t parquet_preview_plan(
+    const char * _Nonnull path,
+    parquet_preview_export_plan * _Nonnull out_plan,
+    char * _Nullable * _Nonnull out_error
+);
+
+/* 0 on success. `progress` may be NULL; a non-zero cancel stops the write. */
+int32_t parquet_preview_export_file(
+    const char * _Nonnull source,
+    const char * _Nonnull dest,
+    parquet_preview_export_progress * _Nullable progress,
+    char * _Nullable * _Nonnull out_error
+);
+
+/* 0 on success. `json` is the rows view already loaded in the preview. */
+int32_t parquet_preview_export_table(
+    const char * _Nonnull json,
+    const char * _Nonnull dest,
+    parquet_preview_export_plan * _Nullable out_plan,
+    char * _Nullable * _Nonnull out_error
+);
+
 /* 0 on success. `cancel` may be NULL; a non-zero value stops the scan. */
 int32_t parquet_preview_stats(
     const char * _Nonnull path,

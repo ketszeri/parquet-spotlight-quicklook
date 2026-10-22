@@ -134,6 +134,10 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.selectStatsTabForTest()
     }
 
+    @objc func excelPlanForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.excelPlanForTest() ?? "failed"
+    }
+
     @objc var statsPreparationStatus: String {
         (view as? ParquetQuickLookView)?.statsStatus ?? "idle"
     }
@@ -167,6 +171,13 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private var adjustingTable = false
     private var geometryObserversInstalled = false
     private var aligningFilters = false
+    private var exportBusy = false
+    private var loadedColumns: [(name: String, type: String)] = []
+    private var exportProgress: UnsafeMutablePointer<parquet_preview_export_progress>?
+    private var exportPanel: NSPanel?
+    private var exportTimer: Timer?
+    private let exportQueue = DispatchQueue(label: "com.rkrug.parquetindexer.export")
+    private let excelPopup = NSPopUpButton()
 
     private let rowsSegment = 0
     private let schemaSegment = 1
@@ -268,6 +279,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         switch RowPreviewDecoder.read(path: path, maxRows: limit, maxColumns: RowPreviewDefaults.hardMaxColumns) {
         case .table(let table):
             kinds = table.columns.map { RowPreviewLogic.kind(forType: $0.typeName) }
+            loadedColumns = table.columns.map { (name: $0.name, type: $0.typeName) }
             rows = table.rows.map { cells in
                 cells.map { PreviewCellValue(text: $0.text, title: $0.title, truncated: $0.truncated) }
             }
@@ -396,7 +408,16 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         outlineScroll.autohidesScrollers = true
         outlineScroll.borderType = .bezelBorder
 
-        let toolbar = NSStackView(views: [tabs, labeled("Rows", peekPopup), search])
+        excelPopup.removeAllItems()
+        excelPopup.pullsDown = true
+        excelPopup.addItem(withTitle: "Excel")
+        excelPopup.addItem(withTitle: "Entire file…")
+        excelPopup.lastItem?.tag = 1
+        excelPopup.addItem(withTitle: "Rows view…")
+        excelPopup.lastItem?.tag = 2
+        excelPopup.target = self
+        excelPopup.action = #selector(excelChanged)
+        let toolbar = NSStackView(views: [tabs, labeled("Rows", peekPopup), search, excelPopup])
         toolbar.orientation = .horizontal
         toolbar.spacing = 8
         toolbar.alignment = .centerY
@@ -431,6 +452,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             filterScroll.isHidden = true
             note.isHidden = true
         }
+        refreshExcelMenu()
 
         NSLayoutConstraint.activate([
             chrome.topAnchor.constraint(equalTo: topAnchor, constant: 12),
@@ -504,6 +526,25 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     var statsStatus: String { statsPanel.status }
 
+    @objc func excelPlanForTest() -> NSString {
+        guard let path = filePath else { return "failed: no file" }
+        switch ExcelExporter.plan(path: path) {
+        case .success(let plan):
+            return "rows=\(plan.rows);columns=\(plan.columns);sheets=\(plan.sheets)" as NSString
+        case .failure(let message):
+            return "failed: \(message)" as NSString
+        }
+    }
+
+    deinit {
+        exportTimer?.invalidate()
+        exportProgress?.pointee.cancel = 1
+        exportQueue.sync {}
+        exportProgress?.deallocate()
+        exportProgress = nil
+        exportPanel?.close()
+    }
+
     @objc func selectStatsTabForTest() {
         showTab(statsSegment)
     }
@@ -555,6 +596,243 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         table.reloadData()
         widenTable()
         layoutFilterFields()
+        refreshExcelMenu()
+    }
+
+    @objc private func excelChanged() {
+        let tag = excelPopup.selectedItem?.tag ?? 0
+        excelPopup.selectItem(at: 0)
+        if tag == 1 {
+            exportEntireFile()
+        } else if tag == 2 {
+            exportActiveView()
+        }
+    }
+
+    private func refreshExcelMenu() {
+        excelPopup.item(at: 1)?.isEnabled = filePath != nil && !exportBusy
+        excelPopup.item(at: 2)?.isEnabled = rowsEnabled && !rows.isEmpty && !loadedColumns.isEmpty && !exportBusy
+    }
+
+    private func exportEntireFile() {
+        guard let path = filePath, !exportBusy else { return }
+        exportBusy = true
+        refreshExcelMenu()
+        showBanner("Checking Excel limits…")
+        exportQueue.async { [weak self] in
+            let plan = ExcelExporter.plan(path: path)
+            DispatchQueue.main.async { [weak self] in
+                self?.continueFileExport(path: path, plan: plan)
+            }
+        }
+    }
+
+    private func continueFileExport(path: String, plan: Result<ExcelPlan, String>) {
+        switch plan {
+        case .failure(let message):
+            exportBusy = false
+            refreshExcelMenu()
+            showBanner("Excel export unavailable: \(message)")
+        case .success(let plan):
+            if plan.exceedsExcelLimits {
+                let alert = NSAlert()
+                alert.messageText = "Excel limits"
+                alert.informativeText = ExcelHandoff.limitNote(rows: plan.rows, sheets: plan.sheets, truncatedColumns: plan.truncatedColumns)
+                alert.addButton(withTitle: "Export")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() != .alertFirstButtonReturn {
+                    exportBusy = false
+                    refreshExcelMenu()
+                    showBanner("Excel export cancelled.")
+                    return
+                }
+            }
+            startFileExport(path: path, plan: plan)
+        }
+    }
+
+    private func startFileExport(path: String, plan: ExcelPlan) {
+        let id = UUID().uuidString
+        guard let staged = ExcelStaging.make(id: id) else {
+            exportBusy = false
+            refreshExcelMenu()
+            showBanner("Excel export could not prepare a file in the preview container.")
+            return
+        }
+        let progress = UnsafeMutablePointer<parquet_preview_export_progress>.allocate(capacity: 1)
+        progress.initialize(to: parquet_preview_export_progress(rows_written: 0, rows_total: UInt64(max(plan.rows, 0)), cancel: 0))
+        exportProgress = progress
+        showExportPanel(total: plan.rows)
+        let destination = staged.xlsx.path
+        exportQueue.async { [weak self] in
+            let result = ExcelExporter.exportFile(source: path, dest: destination, progress: progress)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishFileExport(result: result, staged: staged, plan: plan, source: path)
+            }
+        }
+    }
+
+    private func exportActiveView() {
+        guard !exportBusy, rowsEnabled, !rows.isEmpty, !loadedColumns.isEmpty else { return }
+        let order = visualColumnOrder()
+        guard !order.isEmpty else {
+            showBanner("Excel export needs at least one visible column.")
+            return
+        }
+        let exported = visible.map { source -> [String?] in
+            guard source >= 0, source < rows.count else { return [] }
+            return rows[source].map { $0.text }
+        }
+        guard let json = ExcelHandoff.viewJSON(columns: loadedColumns, rows: exported, order: order) else {
+            showBanner("Excel export could not read the rows view.")
+            return
+        }
+        let source = filePath ?? "rows"
+        let id = UUID().uuidString
+        guard let staged = ExcelStaging.make(id: id) else {
+            showBanner("Excel export could not prepare a file in the preview container.")
+            return
+        }
+        exportBusy = true
+        refreshExcelMenu()
+        showBanner("Writing the rows view…")
+        let destination = staged.xlsx.path
+        exportQueue.async { [weak self] in
+            let result = ExcelExporter.exportTable(json: json, dest: destination)
+            DispatchQueue.main.async { [weak self] in
+                self?.finishTableExport(result: result, staged: staged, source: source)
+            }
+        }
+    }
+
+    private func finishFileExport(
+        result: Result<Void, String>,
+        staged: ExcelStaging.Staged,
+        plan: ExcelPlan,
+        source: String
+    ) {
+        closeExportPanel()
+        switch result {
+        case .failure(let message):
+            try? FileManager.default.removeItem(at: staged.xlsx)
+            exportBusy = false
+            refreshExcelMenu()
+            if message == "export cancelled" {
+                showBanner("Excel export cancelled.")
+            } else {
+                showBanner("Excel export unavailable: \(message)")
+            }
+        case .success:
+            publishExport(staged: staged, source: source, mode: "file", plan: plan)
+        }
+    }
+
+    private func finishTableExport(
+        result: Result<ExcelPlan, String>,
+        staged: ExcelStaging.Staged,
+        source: String
+    ) {
+        switch result {
+        case .failure(let message):
+            try? FileManager.default.removeItem(at: staged.xlsx)
+            exportBusy = false
+            refreshExcelMenu()
+            showBanner("Excel export unavailable: \(message)")
+        case .success(let plan):
+            publishExport(staged: staged, source: source, mode: "view", plan: plan)
+        }
+    }
+
+    private func publishExport(staged: ExcelStaging.Staged, source: String, mode: String, plan: ExcelPlan) {
+        let request = ExcelHandoff.Request(
+            id: staged.id,
+            suggestedName: ExcelHandoff.suggestedName(sourcePath: source, mode: mode),
+            mode: mode,
+            sheets: plan.sheets,
+            rows: plan.rows,
+            columns: plan.columns,
+            truncatedColumns: plan.truncatedColumns
+        )
+        do {
+            try ExcelHandoff.writeRequest(request, to: staged.request)
+        } catch {
+            try? FileManager.default.removeItem(at: staged.xlsx)
+            exportBusy = false
+            refreshExcelMenu()
+            showBanner("Excel export could not hand the workbook to the app.")
+            return
+        }
+        ExcelStaging.launchHost(id: staged.id)
+        exportBusy = false
+        refreshExcelMenu()
+        showBanner("Choose where to save the Excel file in Parquet Quick Look and Index. If that app does not come forward, open it and it will ask.")
+    }
+
+    private func visualColumnOrder() -> [Int] {
+        table.tableColumns.compactMap { column in
+            guard !column.isHidden else { return nil }
+            let index = columnIndex(column)
+            return index >= 0 ? index : nil
+        }
+    }
+
+    private func showBanner(_ text: String) {
+        banner.stringValue = text
+        banner.isHidden = text.isEmpty
+    }
+
+    private func showExportPanel(total: Int64) {
+        exportPanel?.close()
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 96),
+            styleMask: [.titled, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Exporting Excel"
+        panel.level = .floating
+        let label = NSTextField(wrappingLabelWithString: progressText(written: 0, total: total))
+        label.frame = NSRect(x: 16, y: 48, width: 348, height: 36)
+        label.tag = 1
+        let button = NSButton(title: "Cancel", target: self, action: #selector(cancelExport))
+        button.frame = NSRect(x: 262, y: 12, width: 96, height: 28)
+        button.bezelStyle = .rounded
+        panel.contentView?.addSubview(label)
+        panel.contentView?.addSubview(button)
+        panel.center()
+        panel.orderFront(nil)
+        exportPanel = panel
+        exportTimer?.invalidate()
+        exportTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.refreshExportPanel()
+        }
+    }
+
+    private func refreshExportPanel() {
+        guard let progress = exportProgress, let label = exportPanel?.contentView?.viewWithTag(1) as? NSTextField else { return }
+        let text = progressText(written: Int64(progress.pointee.rows_written), total: Int64(progress.pointee.rows_total))
+        label.stringValue = text
+        showBanner(text)
+    }
+
+    private func progressText(written: Int64, total: Int64) -> String {
+        if total > 0 {
+            return "Writing row \(written) of \(total)."
+        }
+        return "Writing rows…"
+    }
+
+    @objc private func cancelExport() {
+        exportProgress?.pointee.cancel = 1
+    }
+
+    private func closeExportPanel() {
+        exportTimer?.invalidate()
+        exportTimer = nil
+        exportPanel?.close()
+        exportPanel = nil
+        exportProgress?.deallocate()
+        exportProgress = nil
     }
 
     private func widenTable() {

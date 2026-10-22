@@ -8,6 +8,7 @@ mod capped;
 mod decode;
 mod detect;
 mod error;
+mod export;
 mod format;
 mod limits;
 mod preflight;
@@ -216,6 +217,148 @@ pub unsafe extern "C" fn parquet_preview_stats(
     }
 }
 
+/// Excel plan. Field order matches `parquet_preview_export_plan` in the C header.
+#[repr(C)]
+pub struct parquet_preview_export_plan {
+    pub rows: i64,
+    pub columns: u32,
+    pub sheets: u32,
+    pub truncated_columns: u32,
+}
+
+fn fill_plan(slot: *mut parquet_preview_export_plan, plan: &export::ExportPlan) {
+    if slot.is_null() {
+        return;
+    }
+    unsafe {
+        *slot = parquet_preview_export_plan {
+            rows: plan.rows,
+            columns: u32::try_from(plan.columns).unwrap_or(u32::MAX),
+            sheets: plan.sheets,
+            truncated_columns: u32::try_from(plan.truncated_columns).unwrap_or(u32::MAX),
+        };
+    }
+}
+
+fn export_failed(out_error: *mut *mut c_char, error: export::ExportError) -> i32 {
+    write_c_string(out_error, error.message());
+    1
+}
+
+unsafe fn c_text<'a>(ptr: *const c_char) -> Result<&'a str, export::ExportError> {
+    if ptr.is_null() {
+        return Err(export::ExportError::Message("could not read the file"));
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map_err(|_| export::ExportError::Message("could not read the file"))
+}
+
+/// Read the footer and report how an Excel export would be split.
+///
+/// # Safety
+/// `path` must be a valid C string. `out_plan` must be writable. `out_error`
+/// is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_preview_plan(
+    path: *const c_char,
+    out_plan: *mut parquet_preview_export_plan,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
+    if out_plan.is_null() {
+        return export_failed(out_error, export::ExportError::Message("export could not read the file"));
+    }
+    let path = match unsafe { c_text(path) } {
+        Ok(path) => path,
+        Err(error) => return export_failed(out_error, error),
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| export::plan_path(Path::new(path))));
+    match result {
+        Ok(Ok(plan)) => {
+            fill_plan(out_plan, &plan);
+            0
+        }
+        Ok(Err(error)) => export_failed(out_error, error),
+        Err(_) => export_failed(out_error, export::ExportError::Message("export could not read the file")),
+    }
+}
+
+/// Stream `source` into an `.xlsx` at `dest`.
+///
+/// `progress` may be null. A non-zero `cancel` stops the write between rows.
+/// The call blocks the caller; Swift must leave the main thread.
+///
+/// # Safety
+/// `source` and `dest` must be valid C strings. `progress` is null or points
+/// at an [`export::ExportProgress`] that stays alive for the call. `out_error`
+/// is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_preview_export_file(
+    source: *const c_char,
+    dest: *const c_char,
+    progress: *mut export::ExportProgress,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
+    let source = match unsafe { c_text(source) } {
+        Ok(path) => path,
+        Err(error) => return export_failed(out_error, error),
+    };
+    let dest = match unsafe { c_text(dest) } {
+        Ok(path) => path,
+        Err(error) => return export_failed(out_error, error),
+    };
+    let source = Path::new(source).to_path_buf();
+    let dest = Path::new(dest).to_path_buf();
+    let result = catch_unwind(AssertUnwindSafe(|| export::export_file(&source, &dest, progress)));
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => export_failed(out_error, error),
+        Err(_) => export_failed(out_error, export::ExportError::Message("export could not save the workbook")),
+    }
+}
+
+/// Write the already loaded rows view. `json` is `{"columns":[{"name","type"}],"rows":[...]}`.
+///
+/// # Safety
+/// `json` and `dest` must be valid C strings. `out_plan` may be null. `out_error`
+/// is null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn parquet_preview_export_table(
+    json: *const c_char,
+    dest: *const c_char,
+    out_plan: *mut parquet_preview_export_plan,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
+    let json = match unsafe { c_text(json) } {
+        Ok(json) => json,
+        Err(error) => return export_failed(out_error, error),
+    };
+    let dest = match unsafe { c_text(dest) } {
+        Ok(path) => path,
+        Err(error) => return export_failed(out_error, error),
+    };
+    let json = json.to_string();
+    let dest = Path::new(dest).to_path_buf();
+    let result = catch_unwind(AssertUnwindSafe(|| export::export_table(&json, &dest)));
+    match result {
+        Ok(Ok(plan)) => {
+            fill_plan(out_plan, &plan);
+            0
+        }
+        Ok(Err(error)) => export_failed(out_error, error),
+        Err(_) => export_failed(out_error, export::ExportError::Message("export could not save the workbook")),
+    }
+}
+
 /// Release a string returned by [`parquet_preview_read`].
 ///
 /// # Safety
@@ -226,6 +369,60 @@ pub unsafe extern "C" fn parquet_preview_string_free(ptr: *mut c_char) {
         return;
     }
     unsafe { drop(CString::from_raw(ptr)) };
+}
+
+#[cfg(test)]
+mod export_abi_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::io::Read;
+
+    #[test]
+    fn plan_and_file_round_trip_through_the_c_abi() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parquet/snappy.parquet");
+        let dir = std::env::temp_dir().join(format!("parquet-xlsx-abi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("abi.xlsx");
+        let source_c = CString::new(source.to_str().unwrap()).unwrap();
+        let dest_c = CString::new(dest.to_str().unwrap()).unwrap();
+        let mut plan = parquet_preview_export_plan {
+            rows: 0,
+            columns: 0,
+            sheets: 0,
+            truncated_columns: 0,
+        };
+        let mut error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_plan(source_c.as_ptr(), &mut plan, &mut error) };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        assert_eq!(plan.rows, 3);
+        assert!(plan.sheets >= 1);
+        unsafe { parquet_preview_string_free(error) };
+        let mut progress = export::ExportProgress {
+            rows_written: 0,
+            rows_total: 0,
+            cancel: 0,
+        };
+        error = std::ptr::null_mut();
+        let rc = unsafe {
+            parquet_preview_export_file(source_c.as_ptr(), dest_c.as_ptr(), &mut progress, &mut error)
+        };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        assert_eq!(progress.rows_written, 3);
+        let file = std::fs::File::open(&dest).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sheet = String::new();
+        archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet).unwrap();
+        assert!(sheet.contains("alpha"), "{sheet}");
+        assert!(!sheet.contains("<f>"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    unsafe fn error_text(ptr: *mut c_char) -> String {
+        if ptr.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+    }
 }
 
 fn write_c_string(slot: *mut *mut c_char, text: &str) -> bool {

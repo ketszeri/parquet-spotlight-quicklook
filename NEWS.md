@@ -8,6 +8,7 @@
 - Choose 10, 50, 100, 500, or 1000 rows. The window follows the screen, and the table fills that window.
 - Click a column to sort. Filter all columns, or one column, without leaving Quick Look. The per-column fields stay lined up with the columns when you resize, reorder, or scroll.
 - A Stats tab summarises each column, including string columns that are really numbers, dates, or booleans. A partial scan says so.
+- Save the whole file, or the rows you are looking at, as an Excel workbook. The manager app asks where to put it. Large files can span more than one sheet, and values that look like formulas are written as text.
 - A dataset folder previews rows from its first readable Parquet file.
 - If a file cannot be decoded in time, Quick Look stays on the schema and explains why.
 - The Spotlight importer still indexes footer metadata only.

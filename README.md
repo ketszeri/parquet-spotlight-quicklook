@@ -89,6 +89,28 @@ String and binary columns are inspected value by value. Empty and null cells are
 
 Temporal min, max, mean, median, and percentiles are shown as dates or timestamps. Their standard deviation is a number of seconds.
 
+## Save as Excel
+
+The preview's **Excel** menu has two commands.
+
+**Entire file…** streams the Parquet file through the same decoder, one batch at a time, and writes `.xlsx` in constant memory (`rust_xlsxwriter` with the `constant_memory` feature). Numbers, booleans, dates, and timestamps are typed cells. Other values are strings. The header row is bold, the header stays frozen, and each sheet has an autofilter. This path does not use the row-preview caps (2 seconds, 32 MiB, 1000 rows). A progress panel counts rows, and Cancel stops the write between rows.
+
+**Rows view…** writes the rows currently on screen: the active sort, filters, row count, and visible columns in their current order. It does not read the file again.
+
+Excel allows 1,048,576 rows and 16,384 columns on a sheet. One row is the header, so each sheet holds 1,048,575 data rows. A longer file is split across sheets named `Rows`, `Rows 2`, and so on. Columns past 16,384 are left out. The preview says so before writing and continues only after you confirm.
+
+A text cell whose trimmed value starts with `=`, `+`, `-`, or `@` is prefixed with `'`, so Excel does not open it as a formula. Typed numbers, booleans, and dates are not prefixed. Integers whose magnitude is above 2^53 are written as text so the spreadsheet does not round them.
+
+The Quick Look extension is sandboxed with `files.user-selected.read-only` and has no network entitlement, so it cannot show a save panel that writes where you choose. `NSSavePanel` inside the Quick Look view service is not relied on. The extension writes the workbook into its own container, at `Library/Application Support/ParquetPreview/Exports/<uuid>.xlsx`, then asks **Parquet Quick Look and Index** to save it. The handoff is all three of these, so one of them can fail without losing the file:
+
+- the URL `parquetquicklook://export?id=<uuid>` opened in the host app
+- the distributed notification `com.rkrug.parquetindexer.exportReady`
+- launching the host app, which on launch looks for a pending export
+
+The host app is not sandboxed. It accepts the id only when it is a UUID, and it only copies a regular file whose path stays inside that Exports directory (the extension container, or the same folder under the real home when the preview is not sandboxed). It then shows `NSSavePanel` and copies the workbook. The app group is not used for this file: an ad-hoc signature on macOS 26 often rejects the group. The workbook is not uploaded.
+
+A column chunk larger than 128 MiB compressed, or a row group whose metadata says it would expand past 512 MiB, is refused before it is decoded. One page that claims more than 8 MiB uncompressed is refused as well.
+
 ## Prerequisites
 
 - **Minimum supported macOS version: 12.0 (Monterey).**

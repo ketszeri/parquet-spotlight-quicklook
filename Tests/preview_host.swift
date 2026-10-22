@@ -106,6 +106,16 @@ if expected == "rows" {
         exit(1)
     }
     fputs("filter alignment ok\n", stderr)
+    guard let excelPlan = viewController.perform(NSSelectorFromString("excelPlanForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("excel plan missing\n", stderr)
+        exit(1)
+    }
+    fputs("excel plan \(excelPlan)\n", stderr)
+    if !excelPlan.hasPrefix("rows=3;") {
+        fputs("expected an Excel plan for the 3-row fixture\n", stderr)
+        exit(1)
+    }
     viewController.perform(NSSelectorFromString("selectStatsTabForTest"))
     let statsDeadline = Date().addingTimeInterval(12)
     var statsStatus = ""
