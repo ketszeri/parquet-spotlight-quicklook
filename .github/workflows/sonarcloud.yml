@@ -133,11 +133,22 @@ jobs:
               data = json.load(open(path))
           except FileNotFoundError:
               sys.exit(f"missing {path}")
-          files = [entry.get("file", "") for entry in data]
-          print(f"compilation database entries: {len(files)}")
-          for filename in files:
+          # Build Wrapper can record the same translation unit more than once.
+          # Keep the fullest command for each file so the indexer sees it once.
+          best = {}
+          for entry in data:
+              filename = entry.get("file", "")
+              command = entry.get("command") or " ".join(entry.get("arguments") or [])
+              previous = best.get(filename)
+              if previous is None or len(command) > len(previous[0]):
+                  best[filename] = (command, entry)
+          deduped = [item[1] for item in best.values()]
+          with open(path, "w") as handle:
+              json.dump(deduped, handle)
+          print(f"compilation database entries: {len(data)} raw, {len(deduped)} files")
+          for filename in sorted(best):
               print(f"  {filename}")
-          if not files:
+          if not deduped:
               sys.exit("compilation database is empty")
           PY
 
@@ -150,6 +161,9 @@ jobs:
           if [[ -n "$ANALYZE_REF" && "$ANALYZE_REF" != "main" ]]; then
             printf '\nsonar.branch.name=%s\n' "$ANALYZE_REF" >> sonar-project.properties
             printf 'sonar.scm.revision=%s\n' "$ANALYZE_SHA" >> sonar-project.properties
+          fi
+          if [[ -d native ]]; then
+            python3 -c 'from pathlib import Path; p = Path("sonar-project.properties"); t = p.read_text(); old = "sonar.sources=src,preview,Sources,scripts,plist,resources,.github"; assert old in t, "sonar.sources entry not found"; p.write_text(t.replace(old, old + ",native", 1))'
           fi
           if [[ -f native/parquet_preview/Cargo.toml ]]; then
             export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/build/native-target"
