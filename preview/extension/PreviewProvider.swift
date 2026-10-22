@@ -122,8 +122,13 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         private let bytes: [UInt8]
         private(set) var index: Int = 0
 
+        // Total skip work is capped at a small multiple of the input size.
+        private let maxSkips: Int
+        private var skips = 0
+
         init(data: Data) {
             self.bytes = [UInt8](data)
+            self.maxSkips = 8 * self.bytes.count + 100_000
         }
 
         var remaining: Int { bytes.count - index }
@@ -216,6 +221,8 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
 
         mutating func skipValue(type: UInt8, depth: Int = 0) throws {
             guard depth < CompactParser.maxDepth else { throw ParserError.invalidData }
+            skips += 1
+            guard skips <= maxSkips else { throw ParserError.invalidData }
             switch type {
             case CompactType.booleanTrue.rawValue, CompactType.booleanFalse.rawValue:
                 return
