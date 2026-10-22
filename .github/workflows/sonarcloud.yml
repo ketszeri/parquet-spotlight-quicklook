@@ -102,7 +102,24 @@ jobs:
             echo "Build Wrapper path was empty" >&2
             exit 1
           fi
-          "$bw" --out-dir "$BUILD_WRAPPER_OUT_DIR" bash --noprofile --norc -eo pipefail -c '
+          # build-wrapper-macosx-x86 runs the build under Rosetta on Apple Silicon,
+          # so uname -m reports x86_64. scripts/build.sh uses that to pick the
+          # Rust host and then lipo fails because both archives are arm64.
+          host_machine="$(uname -m)"
+          shim=""
+          if [[ "$host_machine" == "arm64" ]]; then
+            shim="$(mktemp -d)"
+            cat > "$shim/uname" <<'EOF'
+          #!/bin/bash
+          if [[ "${1:-}" == "-m" ]]; then
+            echo arm64
+            exit 0
+          fi
+          exec /usr/bin/uname "$@"
+          EOF
+            chmod +x "$shim/uname"
+          fi
+          "$bw" --out-dir "$BUILD_WRAPPER_OUT_DIR" env PATH="${shim:+$shim:}$PATH" bash --noprofile --norc -eo pipefail -c '
             ./scripts/build.sh
             if [[ -f Tests/preview_host_glue.m ]]; then
               sdk="$(xcrun --show-sdk-path)"
@@ -193,7 +210,7 @@ jobs:
             set +e
             (
               cd native/parquet_preview
-              cargo clippy --locked --all-targets --message-format=json
+              cargo clippy --locked --release --all-targets --message-format=json
             ) > build/clippy-report.json
             status=$?
             set -e
