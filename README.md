@@ -394,6 +394,7 @@ Keyword tokens written by importer:
 - Plugin factory UUID: `0E198062-E6D8-4AC2-BBCE-FB860A43A116`
 - Preview extension bundle ID: `com.rkrug.parquetindexer.previewhost.preview`
 - Quick Look host app bundle ID: `com.rkrug.parquetindexer.previewhost`
+- The importer extracts column names only from footers up to 16 MiB and indexes at most 4096 columns per file; larger footers are still indexed as Parquet files, without column names.
 
 ## License
 

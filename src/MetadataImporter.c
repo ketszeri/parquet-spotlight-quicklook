@@ -45,6 +45,10 @@ static CFStringRef kParquetRowCountKey = CFSTR("com_rkrug_parquet_row_count");
 static CFStringRef kParquetColumnCountKey = CFSTR("com_rkrug_parquet_column_count");
 static CFStringRef kParquetColumnsKey = CFSTR("com_rkrug_parquet_columns");
 
+// Upper bounds for footer metadata read from untrusted files.
+#define PARQUET_MAX_FOOTER_LEN (16u * 1024u * 1024u)
+#define PARQUET_MAX_COLUMNS 4096
+
 static int read_parquet_footer(const char *path, uint64_t *file_size, uint32_t *footer_len) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
@@ -265,6 +269,9 @@ static CFArrayRef extract_parquet_column_names(const unsigned char *footer, size
         }
         append_unique_cfstring(columns, name);
         CFRelease(name);
+        if (CFArrayGetCount(columns) >= PARQUET_MAX_COLUMNS) {
+            break;
+        }
     }
 
     // Fallback heuristic: scan footer for identifier-like ASCII strings.
@@ -337,7 +344,7 @@ static int read_parquet_footer_bytes(const char *path, unsigned char **outBytes,
         ((uint32_t)trailer[1] << 8) |
         ((uint32_t)trailer[2] << 16) |
         ((uint32_t)trailer[3] << 24);
-    if (metaLenLE == 0 || (off_t)metaLenLE + 8 > st.st_size) {
+    if (metaLenLE == 0 || metaLenLE > PARQUET_MAX_FOOTER_LEN || (off_t)metaLenLE + 8 > st.st_size) {
         close(fd);
         return -1;
     }
