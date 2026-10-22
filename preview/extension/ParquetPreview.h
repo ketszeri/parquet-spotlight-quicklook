@@ -13,13 +13,13 @@ typedef struct parquet_preview_limits {
 
 /* 0 on success. Caller frees both strings with parquet_preview_string_free. */
 int32_t parquet_preview_read(
-    const char *path,
-    const parquet_preview_limits *limits,
-    char **out_json,
-    char **out_error
+    const char * _Nonnull path,
+    const parquet_preview_limits * _Nonnull limits,
+    char * _Nullable * _Nonnull out_json,
+    char * _Nullable * _Nonnull out_error
 );
 
-void parquet_preview_string_free(char *ptr);
+void parquet_preview_string_free(char * _Nullable ptr);
 
 #if defined(__OBJC__)
 #import <Foundation/Foundation.h>
