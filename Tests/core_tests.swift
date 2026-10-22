@@ -122,6 +122,14 @@ func runCoreTests() {
     let systemOutsideApplications = FakeSystemAccess(existingPaths: ["/tmp/Parquet Quick Look and Index.app"], commandOutputs: [:])
     let snapshot4 = nonAppsEvaluator.evaluate(using: systemOutsideApplications)
     assertTrue(!snapshot4.appInstalledInApplications, "app outside Applications should not count as installed")
+
+    // Self-removal must pass the bundle path as a positional parameter, never inside the script.
+    let pathWithShellSyntax = "/Users/x/Apps/$(echo a) `echo b` \"q\" \\x/Parquet Quick Look and Index.app"
+    let args = ParquetSelfRemoval.shellArguments(forRemovingBundleAt: pathWithShellSyntax)
+    assertEqual(args.first, "-c", "self-removal should invoke sh with -c")
+    assertEqual(args[1], "(sleep 1; rm -rf -- \"$1\") >/dev/null 2>&1 &", "shell script must be a fixed string")
+    assertEqual(args.last, pathWithShellSyntax, "bundle path must be passed as the positional argument")
+    assertEqual(args.count, 4, "expected -c, script, argv0, path")
 }
 
 @main
