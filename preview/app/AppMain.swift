@@ -527,11 +527,24 @@ private final class AppModel: ObservableObject {
 
     func autoInstallImporterIfMissing() {
         refreshStatus()
-        guard !importerInstalled else { return }
+        let bundledShort = embeddedImporterVersion()
+        let bundledBuild = embeddedImporterBuild()
+        let installed = installedImporterIdentity()
+        let action = ImporterVersionLogic.action(
+            installedShort: installed?.short,
+            installedBuild: installed?.build,
+            bundledShort: bundledShort,
+            bundledBuild: bundledBuild
+        )
+        guard action != .keep else { return }
         install()
         refreshStatus()
         if importerInstalled {
-            setStatus("Spotlight importer auto-installed.")
+            if action == .replace {
+                setStatus("Spotlight importer updated.")
+            } else {
+                setStatus("Spotlight importer auto-installed.")
+            }
         }
     }
 
@@ -799,6 +812,35 @@ private final class AppModel: ObservableObject {
         let importerInfo = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/Parquet.mdimporter/Contents/Info.plist")
         return bundleVersionString(fromInfoPlistAt: importerInfo) ?? "unknown"
+    }
+
+    private func embeddedImporterBuild() -> Int? {
+        let importerInfo = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/Parquet.mdimporter/Contents/Info.plist")
+        return bundleBuildNumber(fromInfoPlistAt: importerInfo)
+    }
+
+    private func installedImporterIdentity() -> (short: String, build: Int?)? {
+        for destination in [spotlightDst, systemSpotlightDst] {
+            let info = destination.appendingPathComponent("Contents/Info.plist")
+            if let short = bundleVersionString(fromInfoPlistAt: info) {
+                return (short, bundleBuildNumber(fromInfoPlistAt: info))
+            }
+        }
+        return nil
+    }
+
+    private func bundleBuildNumber(fromInfoPlistAt url: URL) -> Int? {
+        guard let dict = NSDictionary(contentsOf: url) as? [String: Any] else {
+            return nil
+        }
+        if let number = dict["CFBundleVersion"] as? Int {
+            return number
+        }
+        if let text = dict["CFBundleVersion"] as? String {
+            return Int(text)
+        }
+        return nil
     }
 
     private func bundleVersionString(fromInfoPlistAt url: URL) -> String? {

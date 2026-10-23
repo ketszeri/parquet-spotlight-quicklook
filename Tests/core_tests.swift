@@ -123,6 +123,13 @@ func runCoreTests() {
     let systemOutsideApplications = FakeSystemAccess(existingPaths: ["/tmp/Parquet Quick Look and Index.app"], commandOutputs: [:])
     let snapshot4 = nonAppsEvaluator.evaluate(using: systemOutsideApplications)
     assertTrue(!snapshot4.appInstalledInApplications, "app outside Applications should not count as installed")
+
+    assertEqual(ImporterVersionLogic.action(installedShort: nil, installedBuild: nil, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .install, "a missing importer is installed")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.2", installedBuild: 8, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .replace, "an older build is replaced")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.2", installedBuild: 14, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .replace, "the ketszeri suffix is compared when the build number matches")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.6", installedBuild: 14, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .keep, "the same importer stays")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.9", installedBuild: 20, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .keep, "a newer installed importer is left alone")
+    assertEqual(ImporterVersionLogic.compareShort("0.4.2", "0.5.0-ketszeri.6"), .orderedAscending, "an older release is older even with a suffix on the new one")
 }
 
 @main

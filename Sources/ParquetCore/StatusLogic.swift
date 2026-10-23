@@ -79,3 +79,68 @@ public struct ParquetStatusEvaluator {
         return false
     }
 }
+
+public enum ImporterInstallAction: Equatable {
+    case install
+    case replace
+    case keep
+}
+
+public enum ImporterVersionLogic {
+    /// Install when nothing is on disk. Replace when the installed importer is
+    /// older. Keep an equal or newer install. `CFBundleVersion` decides when
+    /// both sides have one; otherwise the short version is compared and a
+    /// `-ketszeri.N` suffix is kept, because `ParquetSemVer` strips it.
+    public static func action(installedShort: String?, installedBuild: Int?, bundledShort: String?, bundledBuild: Int?) -> ImporterInstallAction {
+        let bundled = normalize(bundledShort)
+        if bundled.isEmpty || bundled == "unknown" {
+            return .keep
+        }
+        let installed = normalize(installedShort)
+        if installed.isEmpty || installed == "unknown" {
+            return .install
+        }
+        if let installedBuild, let bundledBuild, installedBuild != bundledBuild {
+            return bundledBuild > installedBuild ? .replace : .keep
+        }
+        let order = compareShort(bundled, installed)
+        if order == .orderedDescending {
+            return .replace
+        }
+        return .keep
+    }
+
+    public static func compareShort(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let (leftVersion, leftSuffix) = splitRelease(lhs)
+        let (rightVersion, rightSuffix) = splitRelease(rhs)
+        if let left = ParquetSemVer(looseVersion: leftVersion), let right = ParquetSemVer(looseVersion: rightVersion), left != right {
+            return left < right ? .orderedAscending : .orderedDescending
+        }
+        if leftSuffix != rightSuffix {
+            return leftSuffix < rightSuffix ? .orderedAscending : .orderedDescending
+        }
+        return .orderedSame
+    }
+
+    private static func normalize(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func splitRelease(_ value: String) -> (String, Int) {
+        var raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasPrefix("v") || raw.hasPrefix("V") {
+            raw.removeFirst()
+        }
+        let parts = raw.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        let version = String(parts.first ?? "")
+        let suffix = parts.count > 1 ? suffixNumber(String(parts[1])) : 0
+        return (version, suffix)
+    }
+
+    private static func suffixNumber(_ prerelease: String) -> Int {
+        guard let last = prerelease.split(separator: ".").last, let number = Int(last) else {
+            return 0
+        }
+        return number
+    }
+}
