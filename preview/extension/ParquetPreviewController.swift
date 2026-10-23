@@ -1821,7 +1821,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 }
 
-extension ParquetQuickLookView: NSTextFieldDelegate {
+extension ParquetQuickLookView: NSTextFieldDelegate, NSSearchFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         guard !suppressFilterEdits, !restoringEditor else { return }
         guard let field = obj.object as? NSTextField else {

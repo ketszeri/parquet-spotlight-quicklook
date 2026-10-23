@@ -11,7 +11,7 @@ enum FilterFieldLayout {
     /// pass does not touch a field that is already aligned.
     static var frameWritesForTest = 0
 
-    static func align(table: NSTableView, strip: NSView, fields: [NSTextField]) {
+    static func align<Field: NSTextField>(table: NSTableView, strip: NSView, fields: [Field]) {
         for field in fields {
             let identifier = NSUserInterfaceItemIdentifier("c\(field.tag)")
             let index = table.column(withIdentifier: identifier)
@@ -42,7 +42,7 @@ enum FilterFieldLayout {
 
     /// Compares field frames with column rects in window coordinates, so a
     /// horizontal scroll that only moves one of them fails the check.
-    static func matchesColumnRects(table: NSTableView, fields: [NSTextField]) -> Bool {
+    static func matchesColumnRects<Field: NSTextField>(table: NSTableView, fields: [Field]) -> Bool {
         var sawField = false
         for field in fields {
             let identifier = NSUserInterfaceItemIdentifier("c\(field.tag)")
