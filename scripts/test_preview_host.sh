@@ -154,7 +154,11 @@ cat > "$SETTINGS_DIR/settings.json" <<'EOF'
 EOF
 
 echo "==> Host the view controller with row preview switched off"
+# The rows exercise stores a peek count in the app-group defaults. That
+# suite outranks settings.json, so clear it before the schema-only run.
+defaults delete group.com.rkrug.parquetindexer >/dev/null 2>&1 || true
 "$HOST" "$BUNDLE_DIR" "$FIXTURE" schema-only
+defaults delete group.com.rkrug.parquetindexer >/dev/null 2>&1 || true
 rm -rf "$SETTINGS_DIR"
 
 echo "PASS: preview host"
