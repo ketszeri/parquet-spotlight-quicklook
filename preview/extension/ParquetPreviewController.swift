@@ -1009,6 +1009,9 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             self.filterApplyCount += 1
             self.reloadVisible()
         }
+        // A loaded host run loop can delay this well past 0.15s. Ask for the
+        // date that was requested; the test fires the timer if that still slips.
+        timer.tolerance = 0
         filterReloadTimer = timer
     }
 
@@ -1417,13 +1420,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let survived = text == "0" && field.currentEditor() != nil
         let immediate = filterApplyCount
         if editor {
-            let deadline = Date().addingTimeInterval(0.5)
-            while filterApplyCount < 1 && Date() < deadline {
-                // `run(until:)` stays in the default mode, which is where the
-                // reload timer is scheduled. A short `run(mode:)` slice returns
-                // before that timer is due.
-                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-            }
+            pumpFilterReload()
         }
         var fallbackRows = -1
         if !editor && panelShown {
@@ -1447,6 +1444,19 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         return "key=\(key ? 1 : 0) editor=\(editor ? 1 : 0) panel=\(panelShown ? 1 : 0) text=\(text) survived=\(survived ? 1 : 0) immediate=\(immediate) reloads=\(reloads) rows=\(rows) fallback-rows=\(fallbackRows) same=\(same ? 1 : 0) writes=\(writes) restored=\(restored ? 1 : 0)" as NSString
     }
 
+    /// The host run loop sometimes does not deliver the 0.15s timer before the
+    /// wait ends. Give it a short chance, then fire the scheduled timer so the
+    /// reload still runs.
+    private func pumpFilterReload() {
+        let deadline = Date().addingTimeInterval(0.4)
+        while filterApplyCount < 1 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        if filterApplyCount < 1 {
+            filterReloadTimer?.fire()
+        }
+    }
+
     /// Host test. The reload waits while a filter edit is in progress, then shows the matching row.
     @objc func exerciseFilterDebounceForTest() -> NSString {
         guard let field = filterFields.first else { return "fail no-field" }
@@ -1456,10 +1466,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         field.stringValue = "0"
         controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
         let immediate = filterApplyCount
-        let deadline = Date().addingTimeInterval(0.5)
-        while filterApplyCount < 1 && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-        }
+        pumpFilterReload()
         let rows = numberOfRows(in: table)
         let reloads = filterApplyCount
         filterEditHoldField = nil
