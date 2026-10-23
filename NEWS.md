@@ -1,5 +1,15 @@
 # News
 
+## 0.5.0-ketszeri.7 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- A partial inferred type says how much did not parse, for example `int64, except 1.3%`.
+- Stats lists min, mean, median, max, and standard deviation, then the percentiles from low to high. Summary values are not links. Percentiles, nulls, distinct, and the type marker are.
+- Typing in a column filter shows a caret and filters the rows. If the preview cannot take the keyboard, a filter panel opens instead.
+
 ## 0.5.0-ketszeri.6 - 2026-10-23
 
 Fork release. Update checks look at this fork's GitHub releases.

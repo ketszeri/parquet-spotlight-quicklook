@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0-ketszeri.7 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- A partial inferred type reads `int64, except 1.3%`, the share that did not parse. The row stays tinted, and the marker still opens those values.
+- Stats runs min, mean, median, max, standard deviation, then P25, P75, P95, and P99. Summary values are not links. The type marker, nulls, distinct count, and each percentile use the link color. A percentile keeps rows whose parsed value is at least that percentile, including numbers and dates stored as strings.
+- The filter boxes under the columns take the keyboard. Typing shows a caret and filters the loaded rows. If Quick Look cannot give the preview the keyboard, the click opens a filter panel instead.
+
 ## 0.5.0-ketszeri.6 - 2026-10-23
 
 Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
