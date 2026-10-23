@@ -94,12 +94,18 @@ func runRowPreviewLogicTests() {
 
     assertEqual(
         ColumnStatsFormat.typeLabel(storage: "string", detected: "int", parsedPercent: 98.7),
-        "string → int64 (inferred)",
-        "an inferred string column names the detected type"
+        "int64, except 1.3%",
+        "an inferred string column below 100% shows the share that did not parse"
+    )
+    assertEqual(
+        ColumnStatsFormat.typeLabel(storage: "string", detected: "decimal", parsedPercent: 97),
+        "double, except 3%",
+        "a whole unparsed percent is written without a decimal"
     )
     let partial = ColumnStatsFormat.inferredMarker(storage: "string", detected: "int", parsedPercent: 98.7, unparsed: 13)
     assertTrue(partial?.partial == true, "a high parse rate below 100% is a partial inference")
-    assertTrue(partial?.tooltip.contains("98.7% parse as int64") == true, "the tooltip includes the parse rate")
+    assertEqual(partial?.label ?? "", "int64, except 1.3%", "the partial marker is the inferred type and the unparsed share")
+    assertTrue(partial?.tooltip.contains("1.3% of non-empty values do not parse as int64") == true, "the tooltip names the unparsed share")
     assertTrue(partial?.tooltip.contains("13 values don't") == true, "the tooltip includes the unparsed count")
     assertTrue(partial?.tooltip.contains("Show values that don't parse") == true, "the partial marker offers the unparsed rows")
     let complete = ColumnStatsFormat.inferredMarker(storage: "string", detected: "decimal", parsedPercent: 100, unparsed: 0)

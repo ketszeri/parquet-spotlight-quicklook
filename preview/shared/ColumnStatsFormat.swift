@@ -31,15 +31,35 @@ enum ColumnStatsFormat {
         guard parsedPercent + 0.0001 >= inferenceThresholdPercent else { return nil }
         let name = inferredTypeName(detected)
         let partial = parsedPercent < 100
-        let label = "\(storage) → \(name) (inferred)"
+        let label: String
         let tooltip: String
         if partial {
+            let missed = unparsedPercent(parsedPercent: parsedPercent)
             let skipped = unparsed == 1 ? "1 value doesn't" : "\(unparsed) values don't"
-            tooltip = "\(formatPercent(parsedPercent))% parse as \(name); \(skipped). Show values that don't parse"
+            label = "\(name), except \(formatExceptPercent(missed))%"
+            tooltip = "\(formatExceptPercent(missed))% of non-empty values do not parse as \(name); \(skipped). Show values that don't parse. The stored type is still \(storage)."
         } else {
+            label = "\(storage) → \(name) (inferred)"
             tooltip = "Every non-empty value parses as \(name). The stored type is still \(storage)."
         }
         return InferredMarker(label: label, tooltip: tooltip, partial: partial)
+    }
+
+    /// Share of non-empty values that did not parse, in percent.
+    static func unparsedPercent(parsedPercent: Double) -> Double {
+        guard parsedPercent.isFinite else { return 0 }
+        let missed = 100 - parsedPercent
+        guard missed.isFinite else { return 0 }
+        return min(100, max(0, (missed * 10).rounded() / 10))
+    }
+
+    /// `3` for a whole percent, `1.3` when a tenth remains.
+    static func formatExceptPercent(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if abs(rounded - rounded.rounded()) < 0.05 {
+            return String(Int(rounded.rounded()))
+        }
+        return String(format: "%.1f", rounded)
     }
 
     static func nullLabel(nulls: Int64, percent: Double) -> String {
