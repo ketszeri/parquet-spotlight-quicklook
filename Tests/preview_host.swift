@@ -166,6 +166,48 @@ if expected == "rows" && mode == "marker" {
         exit(1)
     }
     fputs("filter alignment ok\n", stderr)
+    guard let editing = viewController.perform(NSSelectorFromString("exerciseFilterEditingForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter editing exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter editing \(editing)\n", stderr)
+    let editingRequired = [
+        "editor=1",
+        "panel=0",
+        "text=0",
+        "survived=1",
+        "immediate=0",
+        "reloads=1",
+        "rows=1",
+        "same=1",
+        "writes=0",
+        "restored=1"
+    ]
+    for piece in editingRequired where !editing.contains(piece) {
+        fputs("filter editing missing \(piece)\n", stderr)
+        exit(1)
+    }
+    guard let sheet = viewController.perform(NSSelectorFromString("exerciseFilterSheetForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter sheet exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter sheet \(sheet)\n", stderr)
+    for piece in ["panel=1", "sheet=1", "text=1", "rows=1", "cleared=3"] where !sheet.contains(piece) {
+        fputs("filter sheet missing \(piece)\n", stderr)
+        exit(1)
+    }
+    guard let standalone = viewController.perform(NSSelectorFromString("exerciseFilterStandalonePanelForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter panel exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter panel \(standalone)\n", stderr)
+    for piece in ["panel=1", "sheet=0", "text=1", "rows=1", "cleared=3"] where !standalone.contains(piece) {
+        fputs("filter panel missing \(piece)\n", stderr)
+        exit(1)
+    }
     guard let excelPlan = viewController.perform(NSSelectorFromString("excelPlanForTest"))?
         .takeUnretainedValue() as? String else {
         fputs("excel plan missing\n", stderr)

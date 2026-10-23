@@ -130,6 +130,18 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.exerciseFilterAlignmentForTest() ?? 0
     }
 
+    @objc func exerciseFilterEditingForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterEditingForTest() ?? "no-view"
+    }
+
+    @objc func exerciseFilterSheetForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterSheetForTest() ?? "no-view"
+    }
+
+    @objc func exerciseFilterStandalonePanelForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterStandalonePanelForTest() ?? "no-view"
+    }
+
     @objc func selectStatsTabForTest() {
         (view as? ParquetQuickLookView)?.selectStatsTabForTest()
     }
@@ -175,6 +187,19 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
     }
 }
 
+private struct FilterGeometry: Equatable {
+    struct Column: Equatable {
+        var identifier: String
+        var width: Int
+        var hidden: Bool
+        var minX: Int
+    }
+
+    var scrollX: Int
+    var stripWidth: Int
+    var columns: [Column]
+}
+
 final class SchemaNode: NSObject {
     let name: String
     let typeName: String
@@ -217,12 +242,18 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private let statsPanel = StatsPanel()
     private let tabs = NSSegmentedControl()
     private let peekPopup = NSPopUpButton()
-    private let search = NSSearchField()
+    private let search = PreviewSearchField()
     private let note = NSTextField(wrappingLabelWithString: "")
     private let banner = NSTextField(wrappingLabelWithString: "")
-    private let filterScroll = NSScrollView()
-    private let filterDocument = NSView()
-    private var filterFields: [NSTextField] = []
+    private let filterStrip = FilterStripView()
+    private var filterFields: [PreviewTextField] = []
+    private let filterInputPanel = FilterInputPanel()
+    private weak var filterPanelTarget: NSTextField?
+    private var filterPanelBound = false
+    private var filterReloadTimer: Timer?
+    private var filterApplyCount = 0
+    private var restoringEditor = false
+    private var lastFilterGeometry: FilterGeometry?
     private let chipRow = NSStackView()
     private let clearFiltersButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private var suppressFilterEdits = false
@@ -360,12 +391,15 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             tableColumn.minWidth = 88
             tableColumn.resizingMask = .userResizingMask
             table.addTableColumn(tableColumn)
-            let field = NSTextField()
+            let field = PreviewTextField()
             field.placeholderString = column.name
             field.font = NSFont.systemFont(ofSize: 11)
             field.delegate = self
             field.tag = index
-            filterDocument.addSubview(field)
+            field.onRefuseInPlace = { [weak self] source in
+                self?.presentFilterPanel(for: source)
+            }
+            filterStrip.addSubview(field)
             filterFields.append(field)
         }
         table.headerView = NSTableHeaderView()
@@ -395,6 +429,10 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         search.action = #selector(filterChanged)
         search.sendsSearchStringImmediately = true
         search.sendsWholeSearchString = true
+        search.delegate = self
+        search.onRefuseInPlace = { [weak self] source in
+            self?.presentFilterPanel(for: source)
+        }
         note.font = NSFont.systemFont(ofSize: 12)
         note.textColor = .secondaryLabelColor
         note.maximumNumberOfLines = 3
@@ -424,11 +462,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             NotificationCenter.default.addObserver(self, selector: #selector(columnGeometryChanged(_:)), name: NSTableView.columnDidMoveNotification, object: table)
         }
 
-        filterScroll.hasVerticalScroller = false
-        filterScroll.hasHorizontalScroller = false
-        filterScroll.drawsBackground = false
-        filterScroll.documentView = filterDocument
-        filterDocument.frame = NSRect(x: 0, y: 0, width: 800, height: 26)
+        filterStrip.translatesAutoresizingMaskIntoConstraints = false
 
         let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         nameColumn.title = "Column"
@@ -491,7 +525,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         chrome.addArrangedSubview(banner)
         chrome.addArrangedSubview(note)
         chrome.addArrangedSubview(chipRow)
-        chrome.addArrangedSubview(filterScroll)
+        chrome.addArrangedSubview(filterStrip)
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(chrome)
         addSubview(content)
@@ -502,11 +536,10 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
         outlineScroll.translatesAutoresizingMaskIntoConstraints = false
         statsPanel.translatesAutoresizingMaskIntoConstraints = false
-        filterScroll.translatesAutoresizingMaskIntoConstraints = false
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         banner.isHidden = banner.stringValue.isEmpty
         if !showRowControls {
-            filterScroll.isHidden = true
+            filterStrip.isHidden = true
             note.isHidden = true
         }
         refreshExcelMenu()
@@ -518,8 +551,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             toolbar.widthAnchor.constraint(equalTo: chrome.widthAnchor),
             note.widthAnchor.constraint(equalTo: chrome.widthAnchor),
             banner.widthAnchor.constraint(equalTo: chrome.widthAnchor),
-            filterScroll.widthAnchor.constraint(equalTo: chrome.widthAnchor),
-            filterScroll.heightAnchor.constraint(equalToConstant: 28),
+            filterStrip.widthAnchor.constraint(equalTo: chrome.widthAnchor),
+            filterStrip.heightAnchor.constraint(equalToConstant: 28),
             content.topAnchor.constraint(equalTo: chrome.bottomAnchor, constant: 4),
             content.leadingAnchor.constraint(equalTo: chrome.leadingAnchor),
             content.trailingAnchor.constraint(equalTo: chrome.trailingAnchor),
@@ -563,7 +596,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let rowsVisible = index == rowsSegment && rowsEnabled
         let statsVisible = index == statsSegment
         tableScroll.isHidden = !rowsVisible
-        filterScroll.isHidden = !rowsVisible
+        filterStrip.isHidden = !rowsVisible
         statsPanel.isHidden = !statsVisible
         outlineScroll.isHidden = rowsVisible || statsVisible
         search.isHidden = !rowsVisible
@@ -594,6 +627,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     deinit {
+        filterReloadTimer?.invalidate()
         exportTimer?.invalidate()
         exportProgress?.pointee.cancel = 1
         exportQueue.sync {}
@@ -717,7 +751,6 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         report.append(exercisePercentileLink(identifier: "p99", chipPrefix: "id ≥ p99"))
         return report.joined(separator: " | ") as NSString
     }
-
 
     @objc func exerciseUnparsedLinkForTest() -> NSString {
         guard statusReadyForLinks() else { return "fail stats-not-ready" }
@@ -890,8 +923,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     @objc private func filterChanged() {
-        query.globalFilter = search.stringValue
-        reloadVisible()
+        query.globalFilter = editorText(search)
+        applyFilterReload(immediate: !fieldIsEditing(search))
     }
 
     @objc private func tableScrolled() {
@@ -910,6 +943,9 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func reloadVisible() {
+        let editing = editingFilterField()
+        let saved = editing.map { editorText($0) }
+        let range = editing?.currentEditor()?.selectedRange
         visible = RowPreviewLogic.visibleIndexes(rows: rows, kinds: kinds, query: query)
         let matched = RowPreviewLogic.matchCount(rows: rows, query: query)
         var summary = RowPreviewLogic.summary(
@@ -927,10 +963,83 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
         note.stringValue = summary
         refreshChips()
+        let previous = restoringEditor
+        if editing != nil { restoringEditor = true }
         table.reloadData()
         widenTable()
         layoutFilterFields()
+        restoringEditor = previous
+        restoreEditor(editing, text: saved, range: range)
         refreshExcelMenu()
+    }
+
+    private func restoreEditor(_ field: NSTextField?, text: String?, range: NSRange?) {
+        guard let field, field.currentEditor() == nil, let text, let window, window.isKeyWindow else { return }
+        guard !restoringEditor else { return }
+        restoringEditor = true
+        field.stringValue = text
+        if window.makeFirstResponder(field), let range, let editor = field.currentEditor() {
+            editor.selectedRange = range
+        }
+        restoringEditor = false
+    }
+
+    private func applyFilterReload(immediate: Bool) {
+        if immediate {
+            filterReloadTimer?.invalidate()
+            filterReloadTimer = nil
+            filterApplyCount += 1
+            reloadVisible()
+            return
+        }
+        filterReloadTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.15, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.filterReloadTimer = nil
+            self.filterApplyCount += 1
+            self.reloadVisible()
+        }
+        filterReloadTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func cancelFilterReload() {
+        filterReloadTimer?.invalidate()
+        filterReloadTimer = nil
+    }
+
+    private func presentFilterPanel(for field: NSTextField) {
+        if !filterPanelBound {
+            filterPanelBound = true
+            filterInputPanel.onChange = { [weak self] text in
+                self?.applyPanelText(text)
+            }
+        }
+        filterPanelTarget = field
+        let title = field.placeholderString ?? "Filter"
+        filterInputPanel.show(text: editorText(field), title: "Filter \(title)", on: window)
+    }
+
+    private func applyPanelText(_ text: String) {
+        guard let field = filterPanelTarget else { return }
+        suppressFilterEdits = true
+        field.stringValue = text
+        suppressFilterEdits = false
+        writeFilter(text, from: field)
+        applyFilterReload(immediate: true)
+    }
+
+    private func writeFilter(_ text: String, from field: NSTextField) {
+        if field === search {
+            query.globalFilter = text
+            return
+        }
+        guard filterFields.contains(where: { $0 === field }) else { return }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            query.columnFilters.removeValue(forKey: field.tag)
+        } else {
+            query.columnFilters[field.tag] = text
+        }
     }
 
     @objc private func excelChanged() {
@@ -1188,9 +1297,62 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private func alignFilterFields() {
         guard !aligningFilters else { return }
+        let geometry = filterGeometryToken()
+        if geometry == lastFilterGeometry { return }
         aligningFilters = true
-        FilterFieldLayout.align(table: table, document: filterDocument, fields: filterFields)
+        let editing = editingFilterField()
+        let saved = editing.map { editorText($0) }
+        let range = editing?.currentEditor()?.selectedRange
+        // Ending an edit assigns the field frame, which posts textDidChange.
+        // Ignore that notification so a layout pass does not reload the table.
+        let previous = restoringEditor
+        restoringEditor = true
+        FilterFieldLayout.align(table: table, strip: filterStrip, fields: filterFields)
+        lastFilterGeometry = filterGeometryToken()
+        if let editing, editing.currentEditor() == nil, let saved, let window, window.isKeyWindow {
+            editing.stringValue = saved
+            if window.makeFirstResponder(editing), let range, let editor = editing.currentEditor() {
+                editor.selectedRange = range
+            }
+        }
+        restoringEditor = previous
         aligningFilters = false
+    }
+
+    private func filterGeometryToken() -> FilterGeometry {
+        FilterGeometry(
+            scrollX: snap(tableScroll.contentView.bounds.origin.x),
+            stripWidth: snap(filterStrip.bounds.width),
+            columns: table.tableColumns.map { column in
+                let index = table.column(withIdentifier: column.identifier)
+                let minX = index >= 0 ? table.rect(ofColumn: index).minX : 0
+                return FilterGeometry.Column(
+                    identifier: column.identifier.rawValue,
+                    width: snap(column.width),
+                    hidden: column.isHidden,
+                    minX: snap(minX)
+                )
+            }
+        )
+    }
+
+    private func snap(_ value: CGFloat) -> Int {
+        Int((value * 2).rounded())
+    }
+
+    private func editingFilterField() -> NSTextField? {
+        if fieldIsEditing(search) { return search }
+        return filterFields.first { fieldIsEditing($0) }
+    }
+
+    private func fieldIsEditing(_ field: NSTextField) -> Bool {
+        if field.currentEditor() != nil { return true }
+        guard let editor = field.window?.firstResponder as? NSTextView else { return false }
+        return (editor.delegate as AnyObject) === field
+    }
+
+    private func editorText(_ field: NSTextField) -> String {
+        field.currentEditor()?.string ?? field.stringValue
     }
 
     /// Host test: resize a column, scroll sideways, and require the fields to
@@ -1211,6 +1373,106 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         tableScroll.reflectScrolledClipView(clip)
         tableScrolled()
         return FilterFieldLayout.matchesColumnRects(table: table, fields: filterFields) ? 1 : 0
+    }
+
+    /// Host test. Types into the first column field in place and waits for the
+    /// debounced reload. The field object must stay the same, and layout must
+    /// not assign a new frame while the caret is up.
+    @objc func exerciseFilterEditingForTest() -> NSString {
+        guard let field = filterFields.first, let window else { return "fail no-field" }
+        clearAllFilters()
+        let identity = ObjectIdentifier(field)
+        filterApplyCount = 0
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.05))
+        layoutSubtreeIfNeeded()
+        alignFilterFields()
+        guard sendMouseDown(to: field) else { return "fail event" }
+        let editor = field.currentEditor() != nil
+        let panelShown = filterInputPanel.isShownForTest
+        let writesBefore = FilterFieldLayout.frameWritesForTest
+        if let editorView = field.currentEditor() as? NSTextView {
+            let length = (editorView.string as NSString).length
+            editorView.insertText("0", replacementRange: NSRange(location: length, length: 0))
+        }
+        layoutSubtreeIfNeeded()
+        alignFilterFields()
+        let writes = FilterFieldLayout.frameWritesForTest - writesBefore
+        let text = editorText(field)
+        let survived = text == "0" && field.currentEditor() != nil
+        let immediate = filterApplyCount
+        let deadline = Date().addingTimeInterval(0.5)
+        while filterApplyCount < 1 && Date() < deadline {
+            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+        }
+        let rows = numberOfRows(in: table)
+        let reloads = filterApplyCount
+        let same = filterFields.first.map { ObjectIdentifier($0) == identity } ?? false
+        let originalWidth = table.tableColumns.count > 1 ? table.tableColumns[1].width : 0
+        if table.tableColumns.count > 1 {
+            table.tableColumns[1].width += 25
+        }
+        alignFilterFields()
+        let restored = editorText(field) == "0" && field.currentEditor() != nil
+        if table.tableColumns.count > 1 {
+            table.tableColumns[1].width = originalWidth
+            alignFilterFields()
+        }
+        clearAllFilters()
+        return "editor=\(editor ? 1 : 0) panel=\(panelShown ? 1 : 0) text=\(text) survived=\(survived ? 1 : 0) immediate=\(immediate) reloads=\(reloads) rows=\(rows) same=\(same ? 1 : 0) writes=\(writes) restored=\(restored ? 1 : 0)" as NSString
+    }
+
+    @objc func exerciseFilterSheetForTest() -> NSString {
+        exerciseFilterPanel(standalone: false)
+    }
+
+    @objc func exerciseFilterStandalonePanelForTest() -> NSString {
+        exerciseFilterPanel(standalone: true)
+    }
+
+    /// Host test. The column field refuses in-place editing, so the click opens
+    /// a panel. `standalone` uses a floating panel instead of a sheet.
+    private func exerciseFilterPanel(standalone: Bool) -> NSString {
+        guard let field = filterFields.first else { return "fail no-field" }
+        clearAllFilters()
+        field.forceInputPanel = true
+        filterInputPanel.preferStandalone = standalone
+        guard sendMouseDown(to: field) else {
+            field.forceInputPanel = false
+            filterInputPanel.preferStandalone = false
+            return "fail event"
+        }
+        let shown = filterInputPanel.isShownForTest
+        let sheet = filterInputPanel.isSheetForTest
+        filterInputPanel.setTextForTest("1")
+        let rows = numberOfRows(in: table)
+        let text = field.stringValue
+        filterInputPanel.close()
+        field.forceInputPanel = false
+        filterInputPanel.preferStandalone = false
+        clearAllFilters()
+        let clearedRows = numberOfRows(in: table)
+        return "panel=\(shown ? 1 : 0) sheet=\(sheet ? 1 : 0) text=\(text) rows=\(rows) cleared=\(clearedRows)" as NSString
+    }
+
+    private func sendMouseDown(to field: NSTextField) -> Bool {
+        guard let window else { return false }
+        let point = field.convert(NSPoint(x: 8, y: 8), to: nil)
+        guard let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: point,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ) else { return false }
+        field.mouseDown(with: event)
+        return true
     }
 
     override func viewDidMoveToWindow() {
@@ -1413,6 +1675,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
         suppressFilterEdits = false
         closeDistinctSheet()
+        cancelFilterReload()
+        filterInputPanel.close()
         reloadVisible()
     }
 
@@ -1559,23 +1823,14 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
 extension ParquetQuickLookView: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
-        guard !suppressFilterEdits else { return }
+        guard !suppressFilterEdits, !restoringEditor else { return }
         guard let field = obj.object as? NSTextField else {
-            query.globalFilter = search.stringValue
-            reloadVisible()
+            query.globalFilter = editorText(search)
+            applyFilterReload(immediate: true)
             return
         }
-        if field === search {
-            query.globalFilter = field.stringValue
-        } else if field.tag >= 0 {
-            let text = field.stringValue
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                query.columnFilters.removeValue(forKey: field.tag)
-            } else {
-                query.columnFilters[field.tag] = text
-            }
-        }
-        reloadVisible()
+        writeFilter(editorText(field), from: field)
+        applyFilterReload(immediate: !fieldIsEditing(field))
     }
 }
 
@@ -1674,5 +1929,91 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
             return "\(values[row].1)"
         }
         return values[row].0
+    }
+}
+
+/// Panel that can become key even when the Quick Look preview window cannot.
+final class FilterInputWindow: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+/// Used when a filter field cannot take the keyboard inside the preview.
+final class FilterInputPanel: NSObject, NSTextFieldDelegate {
+    let panel = FilterInputWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 360, height: 92),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    private let field = NSTextField()
+    var onChange: ((String) -> Void)?
+    var preferStandalone = false
+    private var updating = false
+
+    override init() {
+        super.init()
+        panel.title = "Filter"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        field.font = NSFont.systemFont(ofSize: 13)
+        field.delegate = self
+        field.frame = NSRect(x: 16, y: 48, width: 328, height: 24)
+        let close = NSButton(title: "Close", target: self, action: #selector(closeClicked))
+        close.frame = NSRect(x: 248, y: 12, width: 96, height: 28)
+        close.bezelStyle = .rounded
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 92))
+        content.addSubview(field)
+        content.addSubview(close)
+        panel.contentView = content
+    }
+
+    var isShownForTest: Bool { panel.isVisible || panel.sheetParent != nil }
+    var isSheetForTest: Bool { panel.sheetParent != nil }
+
+    func show(text: String, title: String, on window: NSWindow?) {
+        panel.title = title
+        updating = true
+        field.stringValue = text
+        updating = false
+        if panel.sheetParent != nil || panel.isVisible {
+            panel.makeFirstResponder(field)
+            return
+        }
+        if !preferStandalone, let window, window.isKeyWindow {
+            window.beginSheet(panel)
+            if panel.sheetParent != nil {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.panel.sheetParent != nil else { return }
+                    self.panel.makeFirstResponder(self.field)
+                }
+                return
+            }
+        }
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(field)
+    }
+
+    func setTextForTest(_ text: String) {
+        field.stringValue = text
+        controlTextDidChange(Notification(name: NSText.didChangeNotification, object: field))
+    }
+
+    func close() {
+        if let parent = panel.sheetParent {
+            parent.endSheet(panel)
+        }
+        panel.orderOut(nil)
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard !updating else { return }
+        onChange?(field.stringValue)
+    }
+
+    @objc private func closeClicked() {
+        close()
     }
 }
