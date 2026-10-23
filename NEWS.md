@@ -1,5 +1,14 @@
 # News
 
+## 0.5.0-ketszeri.5 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- CI actions are pinned, and the row, stats, and Excel code is covered by tests.
+- The long decode, stats, and export functions are split up. What they return is unchanged.
+
 ## 0.5.0-ketszeri.4 - 2026-10-22
 
 Fork release. Update checks look at this fork's GitHub releases.

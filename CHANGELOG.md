@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0-ketszeri.5 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Pinned the CI actions to full commit SHAs.
+- Row, stats, and Excel export paths are covered by tests, and the long Rust functions are split into helpers with the same results.
+- SonarQube Cloud on this fork imports Rust LCOV and Swift coverage. That wiring stays on the fork.
+
 ## 0.5.0-ketszeri.4 - 2026-10-22
 
 Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original author is rkrug. This fork stays MIT licensed. The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
