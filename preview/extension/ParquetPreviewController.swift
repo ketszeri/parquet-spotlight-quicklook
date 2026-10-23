@@ -645,11 +645,13 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     @objc func beginViewExcelExportForTest() {
+        showBanner("")
         excelPopup.selectItem(withTag: 2)
         excelChanged()
     }
 
     @objc func beginFileExcelExportForTest() {
+        showBanner("")
         excelPopup.selectItem(withTag: 1)
         excelChanged()
     }
