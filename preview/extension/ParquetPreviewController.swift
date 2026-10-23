@@ -1395,7 +1395,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         NSApp.setActivationPolicy(.accessory)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.05))
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         layoutSubtreeIfNeeded()
         alignFilterFields()
         guard sendMouseDown(to: field) else { return "fail event" }
@@ -1416,7 +1416,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         if editor {
             let deadline = Date().addingTimeInterval(0.5)
             while filterApplyCount < 1 && Date() < deadline {
-                RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
             }
         }
         var fallbackRows = -1
@@ -1452,7 +1452,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let immediate = filterApplyCount
         let deadline = Date().addingTimeInterval(0.5)
         while filterApplyCount < 1 && Date() < deadline {
-            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
         let rows = numberOfRows(in: table)
         let reloads = filterApplyCount
