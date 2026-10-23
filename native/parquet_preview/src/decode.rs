@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Date32Type, Date64Type, Float32Type, Float64Type, Int32Type, Int64Type, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+    Date32Type, Date64Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
-use arrow_array::Array;
+use arrow_array::{Array, DictionaryArray};
+use arrow_buffer::ArrowNativeType;
 use arrow_schema::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ProjectionMask;
@@ -309,6 +311,18 @@ fn annotated_cell(field: &arrow_schema::Field, array: &arrow_array::ArrayRef, ro
 }
 
 fn annotate_value(array: &dyn Array, row: usize, fallback: Option<&str>) -> (Option<f64>, Vec<String>) {
+    annotate_value_at(array, row, fallback, 0)
+}
+
+fn annotate_value_at(array: &dyn Array, row: usize, fallback: Option<&str>, depth: u8) -> (Option<f64>, Vec<String>) {
+    // Dictionary pages store the value once. Compare that value, not the
+    // clipped display text, so a percentile click uses the same number the
+    // stats scan parsed.
+    if depth < 4 {
+        if let Some((values, index)) = dictionary_slot(array, row) {
+            return annotate_value_at(values, index, fallback, depth + 1);
+        }
+    }
     if let Some(native) = native_annotation(array, row) {
         return native;
     }
@@ -316,19 +330,37 @@ fn annotate_value(array: &dyn Array, row: usize, fallback: Option<&str>) -> (Opt
     annotate_text(owned.as_deref().or(fallback))
 }
 
+fn dictionary_slot(array: &dyn Array, row: usize) -> Option<(&dyn Array, usize)> {
+    if !matches!(array.data_type(), DataType::Dictionary(_, _)) || array.is_null(row) || array.len() <= row {
+        return None;
+    }
+    macro_rules! slot {
+        ($($ty:ty),*) => {
+            $(
+                if let Some(dict) = array.as_any().downcast_ref::<DictionaryArray<$ty>>() {
+                    let index = dict.keys().value(row).as_usize();
+                    return Some((dict.values().as_ref(), index));
+                }
+            )*
+        };
+    }
+    slot!(Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type);
+    None
+}
+
 fn native_annotation(array: &dyn Array, row: usize) -> Option<(Option<f64>, Vec<String>)> {
     if array.is_null(row) || array.len() <= row {
         return Some((None, Vec::new()));
     }
     let (number, kinds): (f64, &[&str]) = match array.data_type() {
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            let value = match array.data_type() {
-                DataType::Int32 => array.as_primitive::<Int32Type>().value(row) as f64,
-                DataType::Int64 => array.as_primitive::<Int64Type>().value(row) as f64,
-                _ => return None,
-            };
-            (value, &["int", "decimal"])
-        }
+        DataType::Int8 => (array.as_primitive::<Int8Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::Int16 => (array.as_primitive::<Int16Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::Int32 => (array.as_primitive::<Int32Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::Int64 => (array.as_primitive::<Int64Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::UInt8 => (array.as_primitive::<UInt8Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::UInt16 => (array.as_primitive::<UInt16Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::UInt32 => (array.as_primitive::<UInt32Type>().value(row) as f64, &["int", "decimal"]),
+        DataType::UInt64 => (array.as_primitive::<UInt64Type>().value(row) as f64, &["int", "decimal"]),
         DataType::Float32 => (f64::from(array.as_primitive::<Float32Type>().value(row)), &["decimal"]),
         DataType::Float64 => (array.as_primitive::<Float64Type>().value(row), &["decimal"]),
         DataType::Boolean => {

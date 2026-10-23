@@ -81,7 +81,9 @@ A page header that claims a huge uncompressed size is rejected before the offici
 
 The preview's segmented control is **Rows / Schema / Stats**. Stats is available even when **Show row preview** is off. Choosing it does not change the Spotlight importer, which stays footer-only.
 
-Each column is one row: storage type, count, nulls with a percent, distinct count, min, max, mean, median, sample standard deviation, 25th and 75th percentiles, and the most common values for text. Percentiles use linear interpolation on the scanned values (`p * (n - 1)`). The standard deviation divides by `n - 1`.
+Each column is one row: storage type, count, nulls with a percent, distinct count, then the summary in the order min, mean, median, max, sample standard deviation, then the percentiles from low to high (P25, P75, P95, P99), then the most common values for text. Percentiles use linear interpolation on the scanned values (`p * (n - 1)`). The standard deviation divides by `n - 1`.
+
+The type marker (when some values did not parse), the null count, the distinct count, and each percentile open the Rows view. A percentile keeps rows whose parsed value is at least that percentile, including string columns of numbers or dates. Min, mean, median, max, and standard deviation are not links. Clickable cells use the system link color and a pointing-hand cursor. The row behind a partial inference stays tinted red.
 
 Parquet footer statistics supply whole-file min, max, and null count when every row group has them and the column is a single leaf. Mean, median, distinct, percentiles, and top values come from a streaming scan. The scan stops at 8 seconds, 256 MiB of bytes read, or 256 columns. If it stops early, the note says the other stats are based on the first N of M rows. Min and max from the footer stay whole-file. The scan runs off the main thread and is cancelled when the preview is released.
 

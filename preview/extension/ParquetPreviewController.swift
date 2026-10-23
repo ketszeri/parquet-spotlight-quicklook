@@ -158,6 +158,10 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.exerciseUnparsedLinkForTest() ?? "no-view"
     }
 
+    @objc func exercisePricePercentilesForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exercisePricePercentilesForTest() ?? "no-view"
+    }
+
     @objc func exportBannerForTest() -> NSString {
         (view as? ParquetQuickLookView)?.exportBannerForTest() ?? ""
     }
@@ -696,15 +700,24 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     @objc func exerciseStatsLinksForTest() -> NSString {
         guard statusReadyForLinks() else { return "fail stats-not-ready" }
         var report: [String] = []
+        report.append("order=\(statsPanel.columnOrderForTest())")
+        report.append("style-min=\(statsPanel.cellStyleForTest(columnName: "id", identifier: "min"))")
+        report.append("style-mean=\(statsPanel.cellStyleForTest(columnName: "id", identifier: "mean"))")
+        report.append("style-p25=\(statsPanel.cellStyleForTest(columnName: "id", identifier: "p25"))")
+        report.append("style-null=\(statsPanel.cellStyleForTest(columnName: "label", identifier: "nulls"))")
+        report.append("min-click=\(statsPanel.clickForTest(columnName: "id", identifier: "min"))")
+        report.append("max-click=\(statsPanel.clickForTest(columnName: "id", identifier: "max"))")
+        report.append("median-click=\(statsPanel.clickForTest(columnName: "id", identifier: "median"))")
+        report.append("mean-click=\(statsPanel.clickForTest(columnName: "id", identifier: "mean"))")
         report.append(exerciseNullLink())
         report.append(exerciseDistinctLink())
-        report.append(exerciseBoundLink(identifier: "min", chip: "id = 0 (min)"))
-        report.append(exerciseBoundLink(identifier: "max", chip: "id = 2 (max)"))
-        report.append(exerciseBoundLink(identifier: "median", chip: "id = 1 (median)"))
+        report.append(exercisePercentileLink(identifier: "p25", chipPrefix: "id ≥ p25"))
+        report.append(exercisePercentileLink(identifier: "p75", chipPrefix: "id ≥ p75"))
         report.append(exercisePercentileLink(identifier: "p95", chipPrefix: "id ≥ p95"))
         report.append(exercisePercentileLink(identifier: "p99", chipPrefix: "id ≥ p99"))
         return report.joined(separator: " | ") as NSString
     }
+
 
     @objc func exerciseUnparsedLinkForTest() -> NSString {
         guard statusReadyForLinks() else { return "fail stats-not-ready" }
@@ -777,21 +790,15 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         return "distinct values=\(listed) note=\(distinctNote) mode=\(distinctChip) value=\(valueChip) rows=\(shown) kept=\(kept)"
     }
 
-    private func exerciseBoundLink(identifier: String, chip: String) -> String {
-        clearAllFilters()
-        guard statsPanel.clickForTest(columnName: "id", identifier: identifier) else { return "fail \(identifier)-click" }
-        let actual = query.links.first?.chip ?? ""
-        let shown = numberOfRows(in: table)
-        let text = shown == 1 ? (rows[visible[0]][0].text ?? "") : ""
-        let noteHasCount = note.stringValue.contains("showing")
-        return "\(identifier) chip=\(actual) expect=\(chip) rows=\(shown) text=\(text) noted=\(noteHasCount)"
-    }
-
     private func exercisePercentileLink(identifier: String, chipPrefix: String) -> String {
         clearAllFilters()
         guard statsPanel.clickForTest(columnName: "id", identifier: identifier) else { return "fail \(identifier)-click" }
         let actual = query.links.first?.chip ?? ""
         let shown = numberOfRows(in: table)
+        let texts = visible.map { source -> String in
+            guard source < rows.count, !rows[source].isEmpty else { return "" }
+            return rows[source][0].text ?? "null"
+        }.joined(separator: ",")
         if let hundred = peekPopup.itemArray.first(where: { $0.tag == 100 }) {
             peekPopup.select(hundred)
             peekChanged()
@@ -799,7 +806,55 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let kept = query.links.contains { $0.chip.hasPrefix(chipPrefix) }
         let still = numberOfRows(in: table)
         clearAllFilters()
-        return "\(identifier) chip=\(actual) rows=\(shown) kept=\(kept) still=\(still)"
+        return "\(identifier) chip=\(actual) rows=\(shown) texts=\(texts) kept=\(kept) still=\(still)"
+    }
+
+    @objc func exercisePricePercentilesForTest() -> NSString {
+        guard statusReadyForLinks() else { return "fail stats-not-ready" }
+        selectPeekCount(100)
+        var report: [String] = []
+        report.append(exercisePricePercentile(identifier: "p95", expectedMin: 90, expectedRows: 5))
+        if let fifty = peekPopup.itemArray.first(where: { $0.tag == 50 }) {
+            peekPopup.select(fifty)
+            peekChanged()
+        }
+        let kept = query.links.contains { $0.chip.hasPrefix("price ≥ p95") }
+        let narrowed = numberOfRows(in: table)
+        selectPeekCount(100)
+        let restored = numberOfRows(in: table)
+        report.append("kept=\(kept) narrowed=\(narrowed) restored=\(restored)")
+        report.append(exercisePricePercentile(identifier: "p25", expectedMin: 24, expectedRows: 71))
+        report.append("tint=\(statsPanel.rowTintedForTest(columnName: "price"))")
+        report.append("type-style=\(statsPanel.cellStyleForTest(columnName: "price", identifier: "type"))")
+        report.append("type=\(statsPanel.typeLabelForTest(columnName: "price"))")
+        clearAllFilters()
+        report.append("cleared=\(query.links.isEmpty)")
+        return report.joined(separator: " | ") as NSString
+    }
+
+    private func selectPeekCount(_ count: Int) {
+        guard let item = peekPopup.itemArray.first(where: { $0.tag == count }) else { return }
+        peekPopup.select(item)
+        peekChanged()
+    }
+
+    private func exercisePricePercentile(identifier: String, expectedMin: Int, expectedRows: Int) -> String {
+        clearAllFilters()
+        guard statsPanel.clickForTest(columnName: "price", identifier: identifier) else {
+            return "fail \(identifier)-click"
+        }
+        var numbers: [Int] = []
+        var unparsed = 0
+        for source in visible where source < rows.count && !rows[source].isEmpty {
+            let text = rows[source][0].text ?? ""
+            if let value = Int(text) {
+                numbers.append(value)
+            } else if !text.isEmpty {
+                unparsed += 1
+            }
+        }
+        let minValue = numbers.min() ?? -1
+        return "\(identifier) rows=\(numbers.count) min=\(minValue) unparsed=\(unparsed) expectMin=\(expectedMin) expectRows=\(expectedRows) chip=\(query.links.first?.chip ?? "")"
     }
 
     @objc private func peekChanged() {
@@ -1160,6 +1215,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
         guard window != nil else { return }
         PreviewLog.stage("view.window")
         if let failure = ParquetCatchException({

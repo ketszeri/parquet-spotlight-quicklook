@@ -138,6 +138,27 @@ if expected == "rows" && mode == "marker" {
         fputs("clearing filters should remove the unparsed chip and leave the rows view\n", stderr)
         exit(1)
     }
+    guard let prices = viewController.perform(NSSelectorFromString("exercisePricePercentilesForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("price percentile exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("price percentiles \(prices)\n", stderr)
+    let priceRequired = [
+        "p95 rows=5 min=90 unparsed=0",
+        "price ≥ p95",
+        "kept=true narrowed=0 restored=5",
+        "p25 rows=71 min=24 unparsed=0",
+        "price ≥ p25",
+        "tint=true",
+        "type-style=link",
+        "type=int64, except",
+        "cleared=true"
+    ]
+    for piece in priceRequired where !prices.contains(piece) {
+        fputs("price percentiles missing \(piece)\n", stderr)
+        exit(1)
+    }
 } else if expected == "rows" {
     guard let aligned = viewController.perform(NSSelectorFromString("exerciseFilterAlignmentForTest"))?
         .takeUnretainedValue() as? NSNumber, aligned.intValue == 1 else {
@@ -222,14 +243,24 @@ if expected == "rows" && mode == "marker" {
         "showing 2 of 2 distinct",
         "mode=label: distinct",
         "value=label = alpha",
-        "min chip=id = 0 (min) expect=id = 0 (min) rows=1 text=0",
-        "max chip=id = 2 (max) expect=id = 2 (max) rows=1 text=2",
-        "median chip=id = 1 (median) expect=id = 1 (median) rows=1 text=1",
+        "order=name,type,count,nulls,distinct,min,mean,median,max,stddev,p25,p75,p95,p99,top",
+        "style-min=text",
+        "style-mean=text",
+        "style-p25=link",
+        "style-null=link",
+        "min-click=false",
+        "max-click=false",
+        "median-click=false",
+        "mean-click=false",
+        "p25 chip=id ≥ p25",
+        "p25 texts=1,2",
+        "p75 chip=id ≥ p75",
+        "p75 texts=2",
         "p95 chip=id ≥ p95",
+        "p95 texts=2",
         "p99 chip=id ≥ p99",
-        "p95 chip=",
-        "kept=true still=1",
-        "p99 chip="
+        "p99 texts=2",
+        "kept=true still=1"
     ]
     for piece in required where !links.contains(piece) {
         fputs("stats links missing \(piece)\n", stderr)

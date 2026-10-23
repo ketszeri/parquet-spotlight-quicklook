@@ -95,14 +95,14 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
             ("nulls", "Nulls", 90),
             ("distinct", "Distinct", 120),
             ("min", "Min", 110),
-            ("max", "Max", 110),
             ("mean", "Mean", 90),
             ("median", "Median", 100),
-            ("p95", "P95", 90),
-            ("p99", "P99", 90),
+            ("max", "Max", 110),
             ("stddev", "Stddev", 90),
             ("p25", "P25", 80),
             ("p75", "P75", 80),
+            ("p95", "P95", 90),
+            ("p99", "P99", 90),
             ("top", "Top values", 220)
         ]
         for (identifier, title, width) in titles {
@@ -143,6 +143,12 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         ])
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Tracking areas deliver mouse-moved events only when the window accepts them.
+        window?.acceptsMouseMovedEvents = true
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         columns.count
     }
@@ -177,9 +183,19 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
-        guard let text = cell as? NSTextFieldCell, row >= 0, row < columns.count else { return }
-        let partialType = tableColumn?.identifier.rawValue == "type" && columns[row].isPartial
-        text.textColor = partialType ? .systemRed : .labelColor
+        guard let text = cell as? NSTextFieldCell else { return }
+        text.textColor = textColor(row: row, identifier: tableColumn?.identifier.rawValue ?? "")
+    }
+
+    private func textColor(row: Int, identifier: String) -> NSColor {
+        guard row >= 0, row < columns.count else { return .labelColor }
+        guard let column = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == identifier }) else {
+            return .labelColor
+        }
+        if activation(row: row, column: column) != nil {
+            return .linkColor
+        }
+        return .labelColor
     }
 
     func tableView(_ tableView: NSTableView, toolTipFor cell: NSCell, rect: NSRectPointer, tableColumn: NSTableColumn?, row: Int, mouseLocation: NSPoint) -> String {
@@ -248,52 +264,22 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
                 capped: capped,
                 estimate: scanPartial || capped
             )
-        case "min":
-            return boundLink(column: column, row: row, number: column.minNumber, text: column.min, role: "min", count: column.minCount)
-        case "max":
-            return boundLink(column: column, row: row, number: column.maxNumber, text: column.max, role: "max", count: column.maxCount)
-        case "median":
-            return medianLink(column: column, row: row)
-        case "p95":
-            return percentileLink(column: column, row: row, name: "p95", number: column.p95Number, text: column.p95, count: column.p95Count)
-        case "p99":
-            return percentileLink(column: column, row: row, name: "p99", number: column.p99Number, text: column.p99, count: column.p99Count)
+        case "p25", "p75", "p95", "p99":
+            guard let spec = percentileSpec(column: column, identifier: identifier) else { return nil }
+            return percentileLink(column: column, row: row, name: spec.name, number: spec.number, text: spec.text, count: spec.count)
         default:
             return nil
         }
     }
 
-    private func boundLink(column: StatsColumn, row: Int, number: Double?, text: String?, role: String, count: Int64?) -> StatsActivation? {
-        guard let number, let text, !text.isEmpty else { return nil }
-        return .link(StatsLink(
-            column: row,
-            columnName: column.name,
-            kind: .equalsNumber(number, role: role),
-            chip: RowPreviewLogic.boundChip(column: column.name, displayed: text, role: role),
-            total: count.map { Int($0) },
-            totalIsEstimate: scanPartial || count == nil,
-            noun: "rows"
-        ))
-    }
-
-    private func medianLink(column: StatsColumn, row: Int) -> StatsActivation? {
-        guard let median = column.median, let low = column.medianLow, let high = column.medianHigh else { return nil }
-        let lowText = column.medianLowText ?? median
-        let highText = column.medianHighText ?? median
-        let exact = RowPreviewLogic.sameNumber(low, high)
-        let kind: StatsLinkKind = exact ? .equalsNumber(low, role: "median") : .nearestNumbers(low: low, high: high)
-        let chip = exact
-            ? RowPreviewLogic.boundChip(column: column.name, displayed: lowText, role: "median")
-            : RowPreviewLogic.betweenChip(column: column.name, low: lowText, high: highText, median: median)
-        return .link(StatsLink(
-            column: row,
-            columnName: column.name,
-            kind: kind,
-            chip: chip,
-            total: column.medianCount.map { Int($0) },
-            totalIsEstimate: scanPartial || !column.percentilesExact || column.medianCount == nil,
-            noun: "rows"
-        ))
+    private func percentileSpec(column: StatsColumn, identifier: String) -> (name: String, number: Double?, text: String?, count: Int64?)? {
+        switch identifier {
+        case "p25": return ("p25", column.p25Number, column.p25, column.p25Count)
+        case "p75": return ("p75", column.p75Number, column.p75, column.p75Count)
+        case "p95": return ("p95", column.p95Number, column.p95, column.p95Count)
+        case "p99": return ("p99", column.p99Number, column.p99, column.p99Count)
+        default: return nil
+        }
     }
 
     private func percentileLink(column: StatsColumn, row: Int, name: String, number: Double?, text: String?, count: Int64?) -> StatsActivation? {
@@ -317,15 +303,10 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
             return "Show null rows"
         case "distinct" where (column.distinct ?? 0) > 0:
             return "Show distinct values"
-        case "min" where column.minNumber != nil:
-            return "Show rows at the minimum"
-        case "max" where column.maxNumber != nil:
-            return "Show rows at the maximum"
-        case "median" where column.medianNumber != nil:
-            if let low = column.medianLow, let high = column.medianHigh, !RowPreviewLogic.sameNumber(low, high) {
-                return "Show rows nearest the median on each side"
-            }
-            return "Show rows at the median"
+        case "p25" where column.p25Number != nil:
+            return "Show rows at or above p25"
+        case "p75" where column.p75Number != nil:
+            return "Show rows at or above p75"
         case "p95" where column.p95Number != nil:
             return "Show rows at or above p95"
         case "p99" where column.p99Number != nil:
@@ -333,6 +314,23 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         default:
             return ""
         }
+    }
+
+    func columnOrderForTest() -> String {
+        table.tableColumns.map(\.identifier.rawValue).joined(separator: ",")
+    }
+
+    func cellStyleForTest(columnName: String, identifier: String) -> String {
+        guard let row = columns.firstIndex(where: { $0.name == columnName }) else { return "missing" }
+        return textColor(row: row, identifier: identifier) == .linkColor ? "link" : "text"
+    }
+
+    func rowTintedForTest(columnName: String) -> Bool {
+        columns.first(where: { $0.name == columnName })?.isPartial == true
+    }
+
+    func typeLabelForTest(columnName: String) -> String {
+        columns.first(where: { $0.name == columnName })?.typeLabel ?? ""
     }
 }
 
@@ -360,7 +358,7 @@ final class StatsTableView: NSTableView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited],
+            options: [.mouseMoved, .activeAlways, .inVisibleRect, .mouseEnteredAndExited],
             owner: self,
             userInfo: nil
         )

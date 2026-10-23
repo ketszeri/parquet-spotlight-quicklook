@@ -33,11 +33,15 @@ struct StatsColumn {
     var medianHigh: Double?
     var medianLowText: String?
     var medianHighText: String?
+    var p25Number: Double?
+    var p75Number: Double?
     var p95Number: Double?
     var p99Number: Double?
     var minCount: Int64?
     var maxCount: Int64?
     var medianCount: Int64?
+    var p25Count: Int64?
+    var p75Count: Int64?
     var p95Count: Int64?
     var p99Count: Int64?
     var percentilesExact: Bool
@@ -154,11 +158,15 @@ enum StatsDecoder {
             medianHigh: double(raw["median_high"]),
             medianLowText: raw["median_low_text"] as? String,
             medianHighText: raw["median_high_text"] as? String,
+            p25Number: double(raw["p25_number"]),
+            p75Number: double(raw["p75_number"]),
             p95Number: double(raw["p95_number"]),
             p99Number: double(raw["p99_number"]),
             minCount: optionalInt64(raw["min_count"]),
             maxCount: optionalInt64(raw["max_count"]),
             medianCount: optionalInt64(raw["median_count"]),
+            p25Count: optionalInt64(raw["p25_count"]),
+            p75Count: optionalInt64(raw["p75_count"]),
             p95Count: optionalInt64(raw["p95_count"]),
             p99Count: optionalInt64(raw["p99_count"]),
             percentilesExact: bool(raw["percentiles_exact"]),

@@ -134,6 +134,10 @@ pub struct ColumnStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub median_high_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub p25_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p75_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub p95_number: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p99_number: Option<f64>,
@@ -143,6 +147,10 @@ pub struct ColumnStats {
     pub max_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub median_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p25_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p75_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p95_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -859,11 +867,15 @@ impl ColumnAccum {
             median_high: numeric.median_high,
             median_low_text: numeric.median_low_text,
             median_high_text: numeric.median_high_text,
+            p25_number: numeric.p25_number,
+            p75_number: numeric.p75_number,
             p95_number: numeric.p95_number,
             p99_number: numeric.p99_number,
             min_count: if min_number == numeric.min_number { numeric.min_count } else { None },
             max_count: if max_number == numeric.max_number { numeric.max_count } else { None },
             median_count: numeric.median_count,
+            p25_count: numeric.p25_count,
+            p75_count: numeric.p75_count,
             p95_count: numeric.p95_count,
             p99_count: numeric.p99_count,
             percentiles_exact: numeric.percentiles_exact,
@@ -944,11 +956,15 @@ struct NumericSummary {
     median_high: Option<f64>,
     median_low_text: Option<String>,
     median_high_text: Option<String>,
+    p25_number: Option<f64>,
+    p75_number: Option<f64>,
     p95_number: Option<f64>,
     p99_number: Option<f64>,
     min_count: Option<u64>,
     max_count: Option<u64>,
     median_count: Option<u64>,
+    p25_count: Option<u64>,
+    p75_count: Option<u64>,
     p95_count: Option<u64>,
     p99_count: Option<u64>,
     percentiles_exact: bool,
@@ -1029,6 +1045,8 @@ impl NumericAccum {
         };
         let stddev = sample_stddev(self.count, self.m2);
         let median_number = percentile(&samples, 0.5);
+        let p25_number = percentile(&samples, 0.25);
+        let p75_number = percentile(&samples, 0.75);
         let p95_number = percentile(&samples, 0.95);
         let p99_number = percentile(&samples, 0.99);
         let (median_low, median_high) = median_number.map(|target| bracket(&samples, target)).unwrap_or((None, None));
@@ -1056,8 +1074,8 @@ impl NumericAccum {
             } else {
                 format_number(stddev)
             }),
-            p25: percentile(&samples, 0.25).map(|value| render(value)),
-            p75: percentile(&samples, 0.75).map(|value| render(value)),
+            p25: p25_number.map(|value| render(value)),
+            p75: p75_number.map(|value| render(value)),
             p95: p95_number.map(|value| render(value)),
             p99: p99_number.map(|value| render(value)),
             min_number: Some(self.min),
@@ -1067,11 +1085,15 @@ impl NumericAccum {
             median_high,
             median_low_text: median_low.map(|value| render(value)),
             median_high_text: median_high.map(|value| render(value)),
+            p25_number,
+            p75_number,
             p95_number,
             p99_number,
             min_count: Some(self.min_count),
             max_count: Some(self.max_count),
             median_count: count_at(&median_needles),
+            p25_count: count_from(p25_number),
+            p75_count: count_from(p75_number),
             p95_count: count_from(p95_number),
             p99_count: count_from(p99_number),
             percentiles_exact: exact,

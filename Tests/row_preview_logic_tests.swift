@@ -182,6 +182,19 @@ func runRowPreviewLogicTests() {
     assertEqual(RowPreviewLogic.atLeastChip(column: "price", name: "p95", displayed: "9"), "price ≥ p95 (9)", "p95 and p99 chips name the percentile")
     let tail = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
     assertEqual(tail, ["9"] as [String?], "p95 keeps parsed values at or above the percentile")
+    let storedAsText: [[PreviewCellValue]] = [
+        [PreviewCellValue(text: "1.234,50", title: nil, truncated: false, number: 1234.5, kinds: ["decimal"])],
+        [PreviewCellValue(text: "9", title: nil, truncated: false, number: 9, kinds: ["int", "decimal"])],
+        [PreviewCellValue(text: "nope", title: nil, truncated: false, number: nil, kinds: [])],
+        [PreviewCellValue(text: "2020-01-03", title: nil, truncated: false, number: 1_578_009_600, kinds: ["date"])],
+        [PreviewCellValue(text: "2020-01-01", title: nil, truncated: false, number: 1_577_836_800, kinds: ["date"])]
+    ]
+    linked.links = [StatsLink(column: 0, columnName: "amount", kind: .atLeast(name: "p25", value: 10), chip: RowPreviewLogic.atLeastChip(column: "amount", name: "p25", displayed: "10"), total: 1, totalIsEstimate: false, noun: "rows")]
+    let european = RowPreviewLogic.visibleIndexes(rows: storedAsText, kinds: parsedKinds, query: linked).map { storedAsText[$0][0].text }
+    assertEqual(european, ["1.234,50"] as [String?], "a percentile keeps the parsed number, not the stored text")
+    linked.links = [StatsLink(column: 0, columnName: "day", kind: .atLeast(name: "p75", value: 1_578_009_600), chip: RowPreviewLogic.atLeastChip(column: "day", name: "p75", displayed: "2020-01-03"), total: 1, totalIsEstimate: false, noun: "rows")]
+    let later = RowPreviewLogic.visibleIndexes(rows: storedAsText, kinds: parsedKinds, query: linked).map { storedAsText[$0][0].text }
+    assertEqual(later, ["2020-01-03"] as [String?], "a date percentile compares epoch seconds from the parsed value")
     linked.globalFilter = "nope"
     linked.links = [StatsLink(column: 0, columnName: "price", kind: .equalsText("nope"), chip: RowPreviewLogic.valueChip(column: "price", value: "nope"), total: nil, totalIsEstimate: true, noun: "rows")]
     linked.peekCount = 1

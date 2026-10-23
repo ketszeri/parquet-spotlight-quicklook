@@ -235,7 +235,12 @@ fn stats_use_footer_and_scanned_values() {
     assert!(id.percentiles_exact);
     assert_eq!(id.min_number, Some(0.0));
     assert_eq!(id.max_number, Some(2.0));
-    assert_eq!(id.p95_number.is_some(), true);
+    assert_eq!(id.p25_number, Some(0.5));
+    assert_eq!(id.p75_number, Some(1.5));
+    assert_eq!(id.p95_number, Some(1.9));
+    assert_eq!(id.p99_number, Some(1.98));
+    assert_eq!(id.p25_count, Some(2));
+    assert_eq!(id.p95_count, Some(1));
     assert_eq!(id.distinct, Some(3));
     assert!(id.distinct_exact);
     assert_eq!(id.values.len(), 3);
@@ -379,6 +384,88 @@ fn bool_and_date_strings_use_parsed_values_only() {
     assert_eq!(uid.unparsed, 1);
     assert!(uid.median.is_none());
     assert!(uid.values.iter().all(|item| item.value != "nope"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn string_percentiles_filter_on_the_parsed_value() {
+    let dir = std::env::temp_dir().join(format!("parquet-percentile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("parsed.parquet");
+    let mut codes = Vec::new();
+    let mut days = Vec::new();
+    let mut money = Vec::new();
+    for index in 0..96 {
+        codes.push(Some(format!("{index}")));
+        days.push(Some(if index < 20 {
+            format!("2020-01-{:02}", index + 1)
+        } else {
+            "nope".to_string()
+        }));
+        money.push(Some(if index == 0 { "1.234,50".to_string() } else { "1.50".to_string() }));
+    }
+    for _ in 0..4 {
+        codes.push(Some("nope".to_string()));
+        days.push(Some("nope".to_string()));
+        money.push(Some("1.50".to_string()));
+    }
+    let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("code", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("day", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("money", arrow_schema::DataType::Utf8, true),
+    ]));
+    let batch = arrow_array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(arrow_array::StringArray::from(codes)),
+            std::sync::Arc::new(arrow_array::StringArray::from(days)),
+            std::sync::Arc::new(arrow_array::StringArray::from(money)),
+        ],
+    )
+    .unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let stats = stats_path(&path, StatsLimits::default(), Arc::new(AtomicBool::new(false))).unwrap();
+    let code = stats.columns.iter().find(|column| column.name == "code").unwrap();
+    assert_eq!(code.detected.as_deref(), Some("int"));
+    let p25 = code.p25_number.unwrap();
+    let p75 = code.p75_number.unwrap();
+    let p95 = code.p95_number.unwrap();
+    let p99 = code.p99_number.unwrap();
+    assert!(p25 < p75 && p75 < p95 && p95 < p99);
+    let day = stats.columns.iter().find(|column| column.name == "day").unwrap();
+    // 20 dates out of 100 is below the inference threshold, so this checks the
+    // parsed epoch on each cell rather than a detected date column.
+    assert!(day.detected.is_none());
+
+    let table = preview_path(&path, Limits { max_rows: 200, ..Limits::default() }).unwrap();
+    assert_eq!(table.cell("money", 0).unwrap().text.as_deref(), Some("1.234,50"));
+    assert_eq!(table.cell("money", 0).unwrap().number, Some(1234.5));
+    let mut kept = Vec::new();
+    for row in &table.rows {
+        let cell = &row[0];
+        if cell.text.as_deref() == Some("nope") {
+            assert!(cell.number.is_none(), "an unparsed string has no percentile value");
+            continue;
+        }
+        let number = cell.number.expect("string-stored number");
+        if number >= p95 {
+            kept.push(cell.text.clone().unwrap_or_default());
+        } else {
+            assert!(number < p95);
+        }
+    }
+    kept.sort();
+    assert_eq!(kept, ["91", "92", "93", "94", "95"]);
+    let day_p95_cell = table.cell("day", 19).unwrap();
+    assert_eq!(day_p95_cell.text.as_deref(), Some("2020-01-20"));
+    let earlier = table.cell("day", 0).unwrap().number.unwrap();
+    let latest = day_p95_cell.number.unwrap();
+    assert!(latest > earlier);
+    assert!(table.cell("day", 20).unwrap().number.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
