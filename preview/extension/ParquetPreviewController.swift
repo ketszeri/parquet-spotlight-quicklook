@@ -1006,7 +1006,11 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             self.reloadVisible()
         }
         filterReloadTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        // `.common` is a set of modes, not a mode the run loop can run. The
+        // default mode is the one typing and the host test actually pump.
+        let loop = RunLoop.current
+        loop.add(timer, forMode: .default)
+        loop.add(timer, forMode: .common)
     }
 
     private func cancelFilterReload() {
