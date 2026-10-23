@@ -999,18 +999,16 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             return
         }
         filterReloadTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.15, repeats: false) { [weak self] _ in
+        // `scheduledTimer` registers the timer on the current run loop in the
+        // default mode. Adding it to the common-mode set afterwards drops it
+        // from that mode, so a default-mode wait never sees it fire.
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.filterReloadTimer = nil
             self.filterApplyCount += 1
             self.reloadVisible()
         }
         filterReloadTimer = timer
-        // `.common` is a set of modes, not a mode the run loop can run. The
-        // default mode is the one typing and the host test actually pump.
-        let loop = RunLoop.current
-        loop.add(timer, forMode: .default)
-        loop.add(timer, forMode: .common)
     }
 
     private func cancelFilterReload() {
@@ -1420,7 +1418,10 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         if editor {
             let deadline = Date().addingTimeInterval(0.5)
             while filterApplyCount < 1 && Date() < deadline {
-                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+                // `run(until:)` stays in the default mode, which is where the
+                // reload timer is scheduled. A short `run(mode:)` slice returns
+                // before that timer is due.
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
             }
         }
         var fallbackRows = -1
@@ -1456,13 +1457,15 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let immediate = filterApplyCount
         let deadline = Date().addingTimeInterval(0.5)
         while filterApplyCount < 1 && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         let rows = numberOfRows(in: table)
         let reloads = filterApplyCount
+        let valid = filterReloadTimer?.isValid == true
+        let fire = filterReloadTimer.map { String(format: "%.3f", $0.fireDate.timeIntervalSinceNow) } ?? "none"
         filterEditHold = false
         clearAllFilters()
-        return "immediate=\(immediate) reloads=\(reloads) rows=\(rows)" as NSString
+        return "immediate=\(immediate) reloads=\(reloads) rows=\(rows) valid=\(valid ? 1 : 0) fire=\(fire)" as NSString
     }
 
     @objc func exerciseFilterSheetForTest() -> NSString {
