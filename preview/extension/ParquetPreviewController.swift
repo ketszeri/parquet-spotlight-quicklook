@@ -750,11 +750,11 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let afterPeek = numberOfRows(in: table)
         let noted = note.stringValue.contains("showing 1 of 1 nulls")
         if let linkChip = chipRow.arrangedSubviews.compactMap({ $0 as? NSButton }).first(where: { $0.title.contains("is null") }) {
-            linkChip.performClick()
+            linkChip.performClick(nil)
         }
         let linkCleared = !query.links.contains { $0.kind == .isNull }
         let columnRemains = query.columnFilters[0] == "2"
-        clearFiltersButton.performClick()
+        clearFiltersButton.performClick(nil)
         let allClear = query.links.isEmpty && query.columnFilters.isEmpty
         return "null chip=\(chip) rows=\(shown) kept=\(keptChip) column=\(keptColumn) after=\(afterPeek) noted=\(noted) linkCleared=\(linkCleared) columnRemains=\(columnRemains) allClear=\(allClear)"
     }
