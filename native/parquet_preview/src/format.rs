@@ -687,9 +687,9 @@ mod tests {
     use arrow_array::builder::{Int32Builder, LargeListBuilder};
     use arrow_array::{
         BinaryArray, BooleanArray, Date64Array, Decimal256Array, FixedSizeBinaryArray, Float32Array,
-        Float64Array, Int16Array, Int8Array, LargeBinaryArray, LargeStringArray, NullArray,
-        StringArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
-        UInt8Array, UInt64Array,
+        Float64Array, Int16Array, Int32Array, Int8Array, LargeBinaryArray, LargeStringArray, NullArray,
+        StringArray, StructArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
+        UInt32Array, UInt8Array, UInt64Array,
     };
     use arrow_buffer::i256;
 
@@ -778,5 +778,139 @@ mod tests {
         let list = lists.finish();
         let nested = cell("xs", DataType::LargeList(Arc::new(Field::new("item", DataType::Int32, true))), Arc::new(list));
         assert!(nested.text.as_deref().unwrap().starts_with('['), "{nested:?}");
+    }
+
+    #[test]
+    fn names_escapes_and_nested_limits_render() {
+        assert_eq!(type_name(&Field::new("a", DataType::Int8, true)), "int8");
+        assert_eq!(type_name(&Field::new("a", DataType::Int16, true)), "int16");
+        assert_eq!(type_name(&Field::new("a", DataType::UInt8, true)), "uint8");
+        assert_eq!(type_name(&Field::new("a", DataType::UInt16, true)), "uint16");
+        assert_eq!(type_name(&Field::new("a", DataType::UInt32, true)), "uint32");
+        assert_eq!(type_name(&Field::new("a", DataType::UInt64, true)), "uint64");
+        assert_eq!(type_name(&Field::new("a", DataType::Binary, true)), "binary");
+        assert_eq!(
+            type_name(&Field::new("a", DataType::Timestamp(TimeUnit::Millisecond, None), true)),
+            "timestamp[ms]"
+        );
+        assert_eq!(
+            type_name(&Field::new(
+                "a",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true
+            )),
+            "timestamp[us, tz]"
+        );
+        assert_eq!(
+            type_name(&Field::new("a", DataType::Timestamp(TimeUnit::Second, None), true)),
+            "timestamp[s]"
+        );
+        assert_eq!(
+            type_name(&Field::new("a", DataType::Timestamp(TimeUnit::Nanosecond, None), true)),
+            "timestamp[ns]"
+        );
+        assert_eq!(type_name(&Field::new("a", DataType::FixedSizeBinary(16), true)), "fixed_size_binary(16)");
+        assert_eq!(type_name(&Field::new("a", DataType::FixedSizeBinary(4), true)), "fixed_size_binary(4)");
+        assert_eq!(
+            type_name(&Field::new(
+                "a",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                true
+            )),
+            "string"
+        );
+        assert_eq!(type_name(&Field::new("a", DataType::Null, true)), "null");
+        assert_eq!(type_name(&Field::new("a", DataType::Decimal128(10, 2), true)), "decimal(10,2)");
+        let weird_map = DataType::Map(Arc::new(Field::new("entries", DataType::Utf8, false)), false);
+        assert_eq!(type_name(&Field::new("m", weird_map, true)), "map");
+
+        let escaped = cell(
+            "s",
+            DataType::Utf8,
+            Arc::new(StringArray::from(vec![Some("a\nb\tc\r\0\u{1}")])),
+        );
+        let escaped = escaped.text.unwrap();
+        assert!(escaped.contains("\\n") && escaped.contains("\\0") && escaped.contains("\\u{1}"), "{escaped}");
+
+        let micros = cell(
+            "us",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            Arc::new(arrow_array::TimestampMicrosecondArray::from(vec![Some(1_500)])),
+        );
+        assert!(micros.text.as_deref().unwrap().contains('.'), "{micros:?}");
+
+        let negative = Decimal256Array::from(vec![Some(i256::from(-1250))])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_eq!(
+            cell("dec", DataType::Decimal256(10, 2), Arc::new(negative)).text.as_deref(),
+            Some("-12.50")
+        );
+        let whole = Decimal256Array::from(vec![Some(i256::from(-12))])
+            .with_precision_and_scale(10, 0)
+            .unwrap();
+        assert_eq!(
+            cell("dec", DataType::Decimal256(10, 0), Arc::new(whole)).text.as_deref(),
+            Some("-12")
+        );
+        let tiny = Decimal256Array::from(vec![Some(i256::from(-1))])
+            .with_precision_and_scale(10, 4)
+            .unwrap();
+        assert_eq!(
+            cell("dec", DataType::Decimal256(10, 4), Arc::new(tiny)).text.as_deref(),
+            Some("-0.0001")
+        );
+
+        let dirty = vec![0x01u8, b'A'];
+        let binary = cell("bin", DataType::Binary, Arc::new(BinaryArray::from(vec![Some(dirty.as_slice())])));
+        assert!(binary.text.as_deref().unwrap().starts_with("0x"), "{binary:?}");
+        let long = vec![0xabu8; 70];
+        let long = cell("bin", DataType::Binary, Arc::new(BinaryArray::from(vec![Some(long.as_slice())])));
+        assert!(long.truncated, "{long:?}");
+        assert!(long.text.as_deref().unwrap().ends_with('…'), "{long:?}");
+
+        use arrow_array::builder::{ListBuilder, StringBuilder};
+        let mut lists = ListBuilder::new(StringBuilder::new());
+        lists.values().append_value("a\"b");
+        lists.values().append_value("c\\d");
+        for _ in 0..6 {
+            lists.values().append_value("z".repeat(80));
+        }
+        lists.append(true);
+        let list = lists.finish();
+        let quoted = cell(
+            "xs",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            Arc::new(list),
+        );
+        let quoted_text = quoted.text.as_deref().unwrap();
+        assert!(quoted_text.contains("\\\"") && quoted_text.contains("\\\\"), "{quoted:?}");
+        assert!(quoted.truncated, "{quoted:?}");
+
+        let wide = StructArray::from(vec![
+            (
+                Arc::new(Field::new("a", DataType::Utf8, true)) as _,
+                Arc::new(StringArray::from(vec![Some("y".repeat(2_500))])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("b", DataType::Int32, true)) as _,
+                Arc::new(Int32Array::from(vec![Some(7)])) as ArrayRef,
+            ),
+        ]);
+        let wide_field = Field::new("row", wide.data_type().clone(), true);
+        let wide_cell = format_cell(&wide_field, &(Arc::new(wide) as ArrayRef), 0);
+        assert!(wide_cell.truncated, "{wide_cell:?}");
+        assert!(wide_cell.title.as_deref().unwrap().ends_with('…'), "{wide_cell:?}");
+
+        let mut values: ArrayRef = Arc::new(Int32Array::from(vec![Some(1)]));
+        for _ in 0..8 {
+            let field = Arc::new(Field::new("item", values.data_type().clone(), true));
+            let offsets = arrow_buffer::OffsetBuffer::new(vec![0, values.len() as i32].into());
+            values = Arc::new(arrow_array::ListArray::new(field, offsets, values, None));
+        }
+        let deep_field = Field::new("deep", values.data_type().clone(), true);
+        let deep = format_cell(&deep_field, &values, 0);
+        assert!(deep.text.as_deref().unwrap().contains('…'), "{deep:?}");
+        assert!(deep.title.is_none(), "{deep:?}");
     }
 }

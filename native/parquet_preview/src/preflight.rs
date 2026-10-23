@@ -350,3 +350,185 @@ pub fn select_row_groups(metadata: &ParquetMetaData, max_rows: u32) -> Vec<usize
     }
     selected
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::sync::Arc;
+
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::errors::ParquetError;
+    use parquet::file::metadata::ParquetMetaDataReader;
+    use parquet::file::properties::WriterProperties;
+
+    fn push_vlq(buf: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            buf.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn zigzag(value: i64) -> u64 {
+        ((value << 1) ^ (value >> 63)) as u64
+    }
+
+    fn i32_field(delta: u8, value: i64) -> Vec<u8> {
+        let mut buf = vec![(delta << 4) | FIELD_I32];
+        push_vlq(&mut buf, zigzag(value));
+        buf
+    }
+
+    fn page(uncompressed: i64, compressed: i64, payload: usize) -> Vec<u8> {
+        let mut buf = i32_field(2, uncompressed);
+        buf.extend(i32_field(1, compressed));
+        buf.push(FIELD_STOP);
+        buf.extend(std::iter::repeat_n(0, payload));
+        buf
+    }
+
+    #[test]
+    fn page_walker_rejects_limits_and_bad_headers() {
+        assert!(walk_pages(&page(10, 4, 4), u64::MAX).is_ok());
+        assert_eq!(
+            walk_pages(&page(HARD_MAX_PAGE_UNCOMPRESSED as i64 + 1, 0, 0), u64::MAX).unwrap_err(),
+            PreviewError::PageTooLarge
+        );
+        assert_eq!(walk_pages(&page(100, 0, 0), 50).unwrap_err(), PreviewError::MemoryLimit);
+        assert_eq!(walk_pages(&page(10, 20, 2), u64::MAX).unwrap_err(), PreviewError::Decode);
+        assert_eq!(walk_pages(&page(-1, 1, 0), u64::MAX).unwrap_err(), PreviewError::Decode);
+
+        let one = page(1, 0, 0);
+        let mut many = Vec::new();
+        for _ in 0..=MAX_PAGES {
+            many.extend_from_slice(&one);
+        }
+        assert_eq!(walk_pages(&many, u64::MAX).unwrap_err(), PreviewError::PageTooLarge);
+
+        let mut huge = vec![(1 << 4) | FIELD_BINARY];
+        push_vlq(&mut huge, MAX_HEADER_BYTES as u64);
+        huge.extend(std::iter::repeat_n(0, MAX_HEADER_BYTES));
+        huge.extend(i32_field(1, 1));
+        huge.extend(i32_field(1, 0));
+        huge.push(FIELD_STOP);
+        assert_eq!(walk_pages(&huge, u64::MAX).unwrap_err(), PreviewError::PageTooLarge);
+
+        let mut overflow = vec![FIELD_I32];
+        push_vlq(&mut overflow, zigzag(40_000));
+        let mut cursor = Cursor::new(&overflow);
+        assert_eq!(read_field_begin(&mut cursor, 0).unwrap_err(), PreviewError::Decode);
+
+        let mut wide = Cursor::new(&[0x80; 10]);
+        assert_eq!(wide.read_vlq().unwrap_err(), PreviewError::Decode);
+        let mut short = Cursor::new(&[1, 2]);
+        assert_eq!(short.skip(3).unwrap_err(), PreviewError::Decode);
+    }
+
+    #[test]
+    fn skipped_thrift_values_cover_each_type() {
+        let samples: Vec<(u8, Vec<u8>, bool)> = vec![
+            (FIELD_TRUE, vec![], true),
+            (FIELD_BYTE, vec![0x7f], true),
+            (FIELD_DOUBLE, vec![0; 8], true),
+            (FIELD_BINARY, vec![1, 0xaa], true),
+            (FIELD_BINARY, vec![50], false),
+            (FIELD_UUID, vec![0; 16], true),
+            (14, vec![], false),
+            (FIELD_LIST, vec![0], true),
+            (FIELD_LIST, vec![(2 << 4) | 1, 1, 0], true),
+            (FIELD_LIST, {
+                let mut body = vec![(15 << 4) | FIELD_BYTE];
+                push_vlq(&mut body, 1);
+                body.push(0xab);
+                body
+            }, true),
+            (FIELD_LIST, {
+                let mut body = vec![(15 << 4) | FIELD_BYTE];
+                push_vlq(&mut body, (MAX_COLLECTION as u64) + 1);
+                body
+            }, false),
+            (FIELD_SET, vec![0], true),
+            (FIELD_MAP, vec![0], true),
+            (FIELD_MAP, vec![1, (FIELD_BYTE << 4) | FIELD_BYTE, 1, 2], true),
+            (FIELD_MAP, {
+                let mut body = Vec::new();
+                push_vlq(&mut body, (MAX_COLLECTION as u64) + 1);
+                body
+            }, false),
+        ];
+        for (kind, body, ok) in samples {
+            let mut cursor = Cursor::new(&body);
+            let result = skip_type(&mut cursor, kind, MAX_SKIP_DEPTH);
+            assert_eq!(result.is_ok(), ok, "type {kind}");
+        }
+
+        let mut nested = Vec::new();
+        for _ in 0..=MAX_SKIP_DEPTH {
+            nested.push((1 << 4) | FIELD_STRUCT);
+        }
+        let mut cursor = Cursor::new(&nested);
+        assert_eq!(
+            skip_type(&mut cursor, FIELD_STRUCT, MAX_SKIP_DEPTH).unwrap_err(),
+            PreviewError::Decode
+        );
+    }
+
+    #[test]
+    fn reader_errors_keep_their_names() {
+        assert_eq!(
+            map_reader_error(ParquetError::General("byte limit".into())),
+            PreviewError::ByteLimit
+        );
+        assert_eq!(
+            map_reader_error(ParquetError::General("timed out".into())),
+            PreviewError::Timeout
+        );
+        assert_eq!(
+            map_reader_error(ParquetError::General("nope".into())),
+            PreviewError::Decode
+        );
+    }
+
+    #[test]
+    fn group_caps_stop_a_real_file_and_later_groups_are_not_required() {
+        let dir = std::env::temp_dir().join(format!("parquet-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![Some(1), Some(2)])) as _],
+        )
+        .unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let file = File::open(&path).unwrap();
+        let metadata = ParquetMetaDataReader::new().parse_and_finish(&file).unwrap();
+        assert!(metadata.num_row_groups() >= 2);
+        assert_eq!(select_row_groups(&metadata, 1), vec![0]);
+        assert_eq!(
+            preflight_one_group(&file, &metadata, 0, 1, 0, u64::MAX).unwrap_err(),
+            PreviewError::MemoryLimit
+        );
+        assert_eq!(
+            preflight_one_group(&file, &metadata, 0, 1, u64::MAX, 0).unwrap_err(),
+            PreviewError::MemoryLimit
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

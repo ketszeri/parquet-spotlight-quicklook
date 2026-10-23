@@ -538,6 +538,35 @@ mod tests {
     }
 
     #[test]
+    fn every_kind_has_a_label_and_bad_clocks_are_rejected() {
+        assert_eq!(DetectedKind::Integer.label(), "int");
+        assert_eq!(DetectedKind::Decimal.label(), "decimal");
+        assert_eq!(DetectedKind::Boolean.label(), "bool");
+        assert_eq!(DetectedKind::Date.label(), "date");
+        assert_eq!(DetectedKind::Timestamp.label(), "timestamp");
+        assert_eq!(DetectedKind::Uuid.label(), "uuid");
+        assert!(parse_temporal("2020-01-02T24:00:00Z").is_none());
+        assert!(parse_temporal("2020-01-02T12:60:00Z").is_none());
+        assert!(parse_temporal("2020-01-02T12:00:61Z").is_none());
+        assert!(parse_number("").is_none());
+        assert!(parse_number("1e2").is_none());
+        assert!(parse_number("+").is_none());
+        assert!(parse_number("1.2.3.4").is_none());
+        assert!((sample_stddev(4, 4.0) - (4.0 / 3.0_f64).sqrt()).abs() < 1e-9);
+        assert_eq!(percentile(&[], 0.5), None);
+        assert_eq!(percentile(&[2.0], 0.0), Some(2.0));
+        assert_eq!(format_civil(CivilTime {
+            year: 2020,
+            month: 1,
+            day: 2,
+            hour: 3,
+            minute: 4,
+            second: 5,
+            has_time: true,
+        }), "2020-01-02T03:04:05Z");
+    }
+
+    #[test]
     fn blanks_do_not_count_and_percentiles_are_linear() {
         let mut probe = StringProbe::default();
         probe.observe("  ");

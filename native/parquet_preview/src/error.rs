@@ -33,3 +33,27 @@ impl fmt::Display for PreviewError {
         f.write_str(self.message())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PreviewError;
+
+    #[test]
+    fn every_failure_has_a_short_message() {
+        let samples = [
+            PreviewError::Timeout,
+            PreviewError::ByteLimit,
+            PreviewError::MemoryLimit,
+            PreviewError::PageTooLarge,
+            PreviewError::NotParquet,
+            PreviewError::NotAFile,
+            PreviewError::Io,
+            PreviewError::Decode,
+        ];
+        for error in samples {
+            let text = error.to_string();
+            assert_eq!(text, error.message());
+            assert!(!text.is_empty());
+        }
+    }
+}
