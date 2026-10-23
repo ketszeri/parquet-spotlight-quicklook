@@ -678,3 +678,105 @@ fn format_civil_date(days: i64) -> String {
     let year = if month <= 2 { y + 1 } else { y };
     format!("{year:04}-{month:02}-{day:02}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use arrow_array::builder::{Int32Builder, LargeListBuilder};
+    use arrow_array::{
+        BinaryArray, BooleanArray, Date64Array, Decimal256Array, FixedSizeBinaryArray, Float32Array,
+        Float64Array, Int16Array, Int8Array, LargeBinaryArray, LargeStringArray, NullArray,
+        StringArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
+        UInt8Array, UInt64Array,
+    };
+    use arrow_buffer::i256;
+
+    fn cell(name: &str, data_type: DataType, array: ArrayRef) -> Cell {
+        format_cell(&Field::new(name, data_type, true), &array, 0)
+    }
+
+    #[test]
+    fn physical_types_outside_the_fixtures_still_render() {
+        assert_eq!(
+            cell("b", DataType::Boolean, Arc::new(BooleanArray::from(vec![Some(false)]))).text.as_deref(),
+            Some("false")
+        );
+        assert!(format_cell(
+            &Field::new("b", DataType::Boolean, true),
+            &(Arc::new(BooleanArray::from(vec![Some(true)])) as ArrayRef),
+            4
+        ).text.is_none());
+        assert_eq!(cell("i8", DataType::Int8, Arc::new(Int8Array::from(vec![Some(-3)]))).text.as_deref(), Some("-3"));
+        assert_eq!(cell("i16", DataType::Int16, Arc::new(Int16Array::from(vec![Some(12)]))).text.as_deref(), Some("12"));
+        assert_eq!(cell("u8", DataType::UInt8, Arc::new(UInt8Array::from(vec![Some(7u8)]))).text.as_deref(), Some("7"));
+        assert_eq!(cell("u16", DataType::UInt16, Arc::new(UInt16Array::from(vec![Some(8u16)]))).text.as_deref(), Some("8"));
+        assert_eq!(cell("u32", DataType::UInt32, Arc::new(UInt32Array::from(vec![Some(9u32)]))).text.as_deref(), Some("9"));
+        assert_eq!(cell("u64", DataType::UInt64, Arc::new(UInt64Array::from(vec![Some(10u64)]))).text.as_deref(), Some("10"));
+
+        let floats = Arc::new(Float64Array::from(vec![Some(f64::NAN), Some(f64::INFINITY), Some(f64::NEG_INFINITY)])) as ArrayRef;
+        let field = Field::new("f", DataType::Float64, true);
+        assert_eq!(format_cell(&field, &floats, 0).text.as_deref(), Some("NaN"));
+        assert_eq!(format_cell(&field, &floats, 1).text.as_deref(), Some("Infinity"));
+        assert_eq!(format_cell(&field, &floats, 2).text.as_deref(), Some("-Infinity"));
+        assert_eq!(
+            cell("f32", DataType::Float32, Arc::new(Float32Array::from(vec![Some(1.5f32)]))).text.as_deref(),
+            Some("1.5")
+        );
+        let wide = cell("s", DataType::LargeUtf8, Arc::new(LargeStringArray::from(vec![Some("plain")])));
+        assert_eq!(wide.text.as_deref(), Some("plain"));
+        let dated = cell("d", DataType::Date64, Arc::new(Date64Array::from(vec![Some(0i64)])));
+        assert_eq!(dated.text.as_deref(), Some("1970-01-01"));
+        let seconds = cell(
+            "ts",
+            DataType::Timestamp(TimeUnit::Second, None),
+            Arc::new(TimestampSecondArray::from(vec![Some(1_577_934_245)])),
+        );
+        assert!(seconds.text.as_deref().unwrap().starts_with("2020-01-02T"), "{seconds:?}");
+        let nanos = cell(
+            "ns",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            Arc::new(TimestampNanosecondArray::from(vec![Some(1_500)])),
+        );
+        assert!(nanos.text.as_deref().unwrap().contains('.'), "{nanos:?}");
+
+        let decimal = Decimal256Array::from(vec![Some(i256::from(1250))])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let amount = cell("dec", DataType::Decimal256(10, 2), Arc::new(decimal));
+        assert_eq!(amount.text.as_deref(), Some("12.50"));
+
+        let bytes = cell("bin", DataType::Binary, Arc::new(BinaryArray::from(vec![Some(&b"ab"[..])])));
+        let rendered = bytes.text.as_deref().unwrap();
+        assert!(rendered.contains("ab") || rendered.contains("61"), "{bytes:?}");
+        let large = cell("lb", DataType::LargeBinary, Arc::new(LargeBinaryArray::from(vec![Some(&b"cd"[..])])));
+        assert!(large.text.is_some());
+        let fixed = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            [Some(&b"abcd"[..])].into_iter(),
+            4,
+        )
+        .unwrap();
+        let raw = cell("fx", DataType::FixedSizeBinary(4), Arc::new(fixed));
+        assert!(raw.text.is_some());
+
+        let nulls = cell("z", DataType::Null, Arc::new(NullArray::new(1)));
+        assert_eq!(nulls.text.as_deref(), Some("null"));
+
+        let keys = UInt8Array::from(vec![Some(0u8), None]);
+        let values = StringArray::from(vec![Some("red")]);
+        let dict = DictionaryArray::try_new(keys, Arc::new(values) as ArrayRef).unwrap();
+        let dict_field = Field::new("code", DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)), true);
+        let dict = Arc::new(dict) as ArrayRef;
+        assert_eq!(format_cell(&dict_field, &dict, 0).text.as_deref(), Some("red"));
+        assert!(format_cell(&dict_field, &dict, 1).text.is_none());
+
+        let mut lists = LargeListBuilder::new(Int32Builder::new());
+        lists.values().append_value(1);
+        lists.values().append_null();
+        lists.append(true);
+        let list = lists.finish();
+        let nested = cell("xs", DataType::LargeList(Arc::new(Field::new("item", DataType::Int32, true))), Arc::new(list));
+        assert!(nested.text.as_deref().unwrap().starts_with('['), "{nested:?}");
+    }
+}

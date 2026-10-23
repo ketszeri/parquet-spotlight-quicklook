@@ -417,6 +417,114 @@ mod export_abi_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn read_and_stats_round_trip_and_reject_bad_pointers() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parquet/snappy.parquet");
+        let source_c = CString::new(source.to_str().unwrap()).unwrap();
+        let mut json = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_read(source_c.as_ptr(), std::ptr::null(), &mut json, &mut error) };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        let text = unsafe { CStr::from_ptr(json).to_string_lossy().into_owned() };
+        assert!(text.contains("alpha"), "{text}");
+        unsafe {
+            parquet_preview_string_free(json);
+            parquet_preview_string_free(error);
+        }
+
+        let limits = parquet_preview_limits {
+            max_rows: 10,
+            max_columns: 1,
+            max_bytes: 1024 * 1024,
+            max_millis: 2_000,
+        };
+        json = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_read(source_c.as_ptr(), &limits, &mut json, &mut error) };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        unsafe { parquet_preview_string_free(json) };
+
+        error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_read(std::ptr::null(), std::ptr::null(), &mut json, &mut error) };
+        assert_ne!(rc, 0);
+        unsafe { parquet_preview_string_free(error) };
+
+        let missing = CString::new(format!("/tmp/parquet-missing-abi-{}", std::process::id())).unwrap();
+        error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_read(missing.as_ptr(), std::ptr::null(), &mut json, &mut error) };
+        assert_ne!(rc, 0);
+        unsafe { parquet_preview_string_free(error) };
+
+        let bad = unsafe { CString::from_vec_unchecked(vec![0xff]) };
+        error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_read(bad.as_ptr(), std::ptr::null(), &mut json, &mut error) };
+        assert_ne!(rc, 0);
+        unsafe { parquet_preview_string_free(error) };
+
+        let rc = unsafe {
+            parquet_preview_read(source_c.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        assert_ne!(rc, 0);
+
+        json = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let mut cancel = 0i32;
+        let stats_limits = parquet_preview_stats_limits {
+            max_columns: 8,
+            max_bytes: 32 * 1024 * 1024,
+            max_millis: 2_000,
+        };
+        let rc = unsafe {
+            parquet_preview_stats(source_c.as_ptr(), &stats_limits, &mut cancel, &mut json, &mut error)
+        };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        let stats = unsafe { CStr::from_ptr(json).to_string_lossy().into_owned() };
+        assert!(stats.contains("\"name\":\"id\"") || stats.contains("id"), "{stats}");
+        unsafe {
+            parquet_preview_string_free(json);
+            parquet_preview_string_free(error);
+        }
+
+        json = std::ptr::null_mut();
+        error = std::ptr::null_mut();
+        let rc = unsafe {
+            parquet_preview_stats(source_c.as_ptr(), std::ptr::null(), std::ptr::null_mut(), &mut json, &mut error)
+        };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        unsafe { parquet_preview_string_free(json) };
+
+        error = std::ptr::null_mut();
+        let rc = unsafe {
+            parquet_preview_stats(std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), &mut json, &mut error)
+        };
+        assert_ne!(rc, 0);
+        unsafe { parquet_preview_string_free(error) };
+
+        let mut plan = parquet_preview_export_plan { rows: 0, columns: 0, sheets: 0, truncated_columns: 0 };
+        error = std::ptr::null_mut();
+        assert_ne!(unsafe { parquet_preview_plan(std::ptr::null(), &mut plan, &mut error) }, 0);
+        unsafe { parquet_preview_string_free(error) };
+        error = std::ptr::null_mut();
+        assert_ne!(unsafe { parquet_preview_plan(source_c.as_ptr(), std::ptr::null_mut(), &mut error) }, 0);
+        unsafe { parquet_preview_string_free(error) };
+        error = std::ptr::null_mut();
+        assert_ne!(
+            unsafe { parquet_preview_export_file(std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), &mut error) },
+            0
+        );
+        unsafe { parquet_preview_string_free(error) };
+        let table = CString::new(r#"{"columns":[{"name":"n","type":"int64"}],"rows":[["1"]]}"#).unwrap();
+        let dest = std::env::temp_dir().join(format!("parquet-abi-table-{}.xlsx", std::process::id()));
+        let dest_c = CString::new(dest.to_str().unwrap()).unwrap();
+        error = std::ptr::null_mut();
+        let rc = unsafe { parquet_preview_export_table(table.as_ptr(), dest_c.as_ptr(), &mut plan, &mut error) };
+        assert_eq!(rc, 0, "{}", unsafe { error_text(error) });
+        assert_eq!(plan.rows, 1);
+        unsafe { parquet_preview_string_free(error) };
+        unsafe { parquet_preview_string_free(std::ptr::null_mut()) };
+        let _ = std::fs::remove_file(&dest);
+    }
+
     unsafe fn error_text(ptr: *mut c_char) -> String {
         if ptr.is_null() {
             return String::new();
