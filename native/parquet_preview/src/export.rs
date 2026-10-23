@@ -628,6 +628,77 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bad_input_and_a_cancel_before_the_first_row() {
+        let missing = std::env::temp_dir().join(format!("parquet-xlsx-missing-{}", std::process::id()));
+        let dest = std::env::temp_dir().join(format!("parquet-xlsx-dest-{}", std::process::id()));
+        assert_eq!(
+            plan_path(&missing).unwrap_err().message(),
+            "could not read the file"
+        );
+        assert_eq!(
+            export_file(&missing, &dest, std::ptr::null_mut()).unwrap_err().message(),
+            "could not read the file"
+        );
+        let dir = std::env::temp_dir().join(format!("parquet-xlsx-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(plan_path(&dir).unwrap_err().message(), "not a regular file");
+        let short = std::env::temp_dir().join(format!("parquet-xlsx-short-{}", std::process::id()));
+        std::fs::write(&short, b"PAR1").unwrap();
+        assert_eq!(plan_path(&short).unwrap_err().message(), "not a parquet file");
+
+        assert_eq!(
+            export_table("{", &dest).unwrap_err().message(),
+            "the rows view could not be read"
+        );
+        let huge = "x".repeat(16 * 1024 * 1024 + 1);
+        assert_eq!(
+            export_table(&huge, &dest).unwrap_err().message(),
+            "the rows view is too large to export"
+        );
+
+        let typed = dir.join("typed.xlsx");
+        let plan = export_table(
+            r#"{
+                "columns": [
+                    {"name": "flag", "type": "bool"},
+                    {"name": "n", "type": "int64"},
+                    {"name": "when", "type": "date"},
+                    {"name": "ts", "type": "timestamp"},
+                    {"name": "note", "type": "string"},
+                    {"name": "score", "type": "float64"}
+                ],
+                "rows": [
+                    ["true", "4", "2020-01-02", "2020-01-02T03:04:05Z", "ok", "1.5"],
+                    ["null", "null", "nope", "nope", null, "nan"],
+                    ["maybe", "nope", "2020-01-02", "2020-01-02 03:04:05", "+cmd", "1e309"]
+                ]
+            }"#,
+            &typed,
+        )
+        .unwrap();
+        assert_eq!(plan.rows, 3);
+        assert_eq!(plan.columns, 6);
+        assert!(typed.is_file());
+
+        let empty = dir.join("empty-cols.xlsx");
+        let empty_plan = export_table(r#"{"columns":[],"rows":[]}"#, &empty).unwrap();
+        assert_eq!(empty_plan.rows, 0);
+        assert_eq!(empty_plan.columns, 0);
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parquet/snappy.parquet");
+        let cancelled = dir.join("cancelled.xlsx");
+        let mut progress = ExportProgress { rows_written: 0, rows_total: 0, cancel: 1 };
+        assert_eq!(
+            export_file(&source, &cancelled, &mut progress).unwrap_err().message(),
+            "export cancelled"
+        );
+        assert!(!cancelled.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&short);
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
     fn sheet_split_keeps_the_rest_of_a_batch() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parquet/snappy.parquet");
         let dir = std::env::temp_dir().join(format!("parquet-xlsx-split-{}", std::process::id()));

@@ -116,6 +116,45 @@ if expected == "rows" {
         fputs("expected an Excel plan for the 3-row fixture\n", stderr)
         exit(1)
     }
+    guard let interactions = viewController.perform(NSSelectorFromString("exerciseInteractionsForTest"))?
+        .takeUnretainedValue() as? String, interactions.hasPrefix("ok ") else {
+        fputs("interaction exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("interactions \(interactions)\n", stderr)
+    if !interactions.contains("filtered=1") {
+        fputs("the alpha filter should leave one row; matching itself is unchanged\n", stderr)
+        exit(1)
+    }
+    func waitForExport(_ selector: String) -> String {
+        viewController.perform(NSSelectorFromString(selector))
+        let exportDeadline = Date().addingTimeInterval(20)
+        var banner = ""
+        while Date() < exportDeadline {
+            banner = viewController.perform(NSSelectorFromString("exportBannerForTest"))?
+                .takeUnretainedValue() as? String ?? ""
+            if banner.contains("Choose where to save")
+                || banner.contains("unavailable")
+                || banner.contains("could not")
+                || banner.contains("cancelled") {
+                return banner
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        return banner
+    }
+    let viewExport = waitForExport("beginViewExcelExportForTest")
+    fputs("view export \(viewExport)\n", stderr)
+    if !viewExport.contains("Choose where to save") {
+        fputs("rows-view export did not hand the workbook to the app\n", stderr)
+        exit(1)
+    }
+    let fileExport = waitForExport("beginFileExcelExportForTest")
+    fputs("file export \(fileExport)\n", stderr)
+    if !fileExport.contains("Choose where to save") {
+        fputs("whole-file export did not hand the workbook to the app\n", stderr)
+        exit(1)
+    }
     viewController.perform(NSSelectorFromString("selectStatsTabForTest"))
     let statsDeadline = Date().addingTimeInterval(12)
     var statsStatus = ""
@@ -129,6 +168,11 @@ if expected == "rows" {
     fputs("stats status=\(statsStatus)\n", stderr)
     if statsStatus != "ready" && statsStatus != "partial" {
         fputs("expected stats status ready or partial\n", stderr)
+        exit(1)
+    }
+    viewController.perform(NSSelectorFromString("exerciseFallbackForTest"))
+    if viewController.value(forKey: "previewPreparationStatus") as? String != "fallback" {
+        fputs("fallback exercise did not report fallback\n", stderr)
         exit(1)
     }
 }

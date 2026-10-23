@@ -130,6 +130,7 @@ struct CoreTestsMain {
     static func main() {
         runCoreTests()
         runRowPreviewLogicTests()
+        runExcelSaveTests()
         print("PASS: core logic tests completed")
     }
 }

@@ -222,6 +222,18 @@ fn confirm_magic(file: &CappedFile, budget: &Budget) -> Result<(), PreviewError>
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_decode_stops_before_opening_the_file() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let error = decode_file(Path::new("missing.parquet"), Limits::default(), cancel).unwrap_err();
+        assert_eq!(error, PreviewError::Timeout);
+    }
+}
+
 fn classify(budget: &Budget, error: impl ToString) -> PreviewError {
     if let Some(reason) = budget.take_reason() {
         return reason;

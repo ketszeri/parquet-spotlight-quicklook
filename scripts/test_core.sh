@@ -16,8 +16,12 @@ xcrun swiftc \
   -O \
   "$ROOT_DIR"/Sources/ParquetCore/*.swift \
   "$ROOT_DIR"/preview/shared/*.swift \
+  "$ROOT_DIR/preview/app/ExcelSave.swift" \
   "$ROOT_DIR/Tests/core_tests.swift" \
   "$ROOT_DIR/Tests/row_preview_logic_tests.swift" \
+  "$ROOT_DIR/Tests/excel_save_tests.swift" \
+  -framework AppKit \
+  -framework UniformTypeIdentifiers \
   -o "$BIN"
 
 "$BIN"

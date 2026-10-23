@@ -138,6 +138,26 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.excelPlanForTest() ?? "failed"
     }
 
+    @objc func exerciseInteractionsForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseInteractionsForTest() ?? "no-view"
+    }
+
+    @objc func beginViewExcelExportForTest() {
+        (view as? ParquetQuickLookView)?.beginViewExcelExportForTest()
+    }
+
+    @objc func beginFileExcelExportForTest() {
+        (view as? ParquetQuickLookView)?.beginFileExcelExportForTest()
+    }
+
+    @objc func exportBannerForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exportBannerForTest() ?? ""
+    }
+
+    @objc func exerciseFallbackForTest() {
+        installTextFallback("host test")
+    }
+
     @objc var statsPreparationStatus: String {
         (view as? ParquetQuickLookView)?.statsStatus ?? "idle"
     }
@@ -547,6 +567,95 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     @objc func selectStatsTabForTest() {
         showTab(statsSegment)
+    }
+
+    /// Host test. Walks sort, filter, schema, and cell drawing without changing
+    /// how a filter matches. Excel exports are started separately so the host
+    /// can wait for them without a save panel.
+    @objc func exerciseInteractionsForTest() -> NSString {
+        guard table.tableColumns.count > 1 else { return "no-columns" }
+        tableView(table, mouseDownInHeaderOf: table.tableColumns[0])
+        let dataColumn = table.tableColumns[1]
+        tableView(table, mouseDownInHeaderOf: dataColumn)
+        tableView(table, mouseDownInHeaderOf: dataColumn)
+        tableView(table, mouseDownInHeaderOf: dataColumn)
+        let sorted = numberOfRows(in: table)
+
+        let rowCount = numberOfRows(in: table)
+        if rowCount > 0 {
+            let numberColumn = table.tableColumns[0]
+            let cell = NSTextFieldCell()
+            var tipRect = NSRect.zero
+            for row in 0..<rowCount {
+                _ = tableView(table, objectValueFor: numberColumn, row: row)
+                _ = tableView(table, objectValueFor: dataColumn, row: row)
+                tableView(table, willDisplayCell: cell, for: numberColumn, row: row)
+                tableView(table, willDisplayCell: cell, for: dataColumn, row: row)
+                _ = tableView(table, toolTipFor: cell, rect: &tipRect, tableColumn: dataColumn, row: row, mouseLocation: .zero)
+                _ = tableView(table, toolTipFor: cell, rect: &tipRect, tableColumn: numberColumn, row: row, mouseLocation: .zero)
+            }
+            _ = tableView(table, objectValueFor: dataColumn, row: rowCount + 4)
+            _ = isNull(row: rowCount + 4, column: dataColumn)
+        }
+
+        search.stringValue = "alpha"
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        let filtered = numberOfRows(in: table)
+        search.stringValue = ""
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: nil))
+        if let field = filterFields.first {
+            field.stringValue = "   "
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+            field.stringValue = "0"
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+            field.stringValue = ""
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+
+        tabs.selectedSegment = schemaSegment
+        tabChanged()
+        let roots = outlineView(outline, numberOfChildrenOfItem: nil)
+        if roots > 0 {
+            let item = outlineView(outline, child: 0, ofItem: nil)
+            _ = outlineView(outline, isItemExpandable: item)
+            for column in outline.tableColumns {
+                _ = outlineView(outline, objectValueFor: column, byItem: item)
+            }
+            _ = outlineView(outline, numberOfChildrenOfItem: item)
+            if outlineView(outline, numberOfChildrenOfItem: item) > 0 {
+                let child = outlineView(outline, child: 0, ofItem: item)
+                _ = outlineView(outline, objectValueFor: nil, byItem: child)
+            }
+        }
+        _ = outlineView(outline, numberOfChildrenOfItem: "not-a-node")
+        _ = outlineView(outline, isItemExpandable: "not-a-node")
+        tabs.selectedSegment = rowsSegment
+        tabChanged()
+
+        if let ten = peekPopup.itemArray.first(where: { $0.tag == 10 }) {
+            peekPopup.select(ten)
+            peekChanged()
+        }
+        columnGeometryChanged(Notification(name: NSTableView.columnDidResizeNotification, object: table))
+        dataColumn.isHidden = true
+        _ = visualColumnOrder()
+        dataColumn.isHidden = false
+        layout()
+        return "ok sorted=\(sorted) filtered=\(filtered)" as NSString
+    }
+
+    @objc func beginViewExcelExportForTest() {
+        excelPopup.selectItem(withTag: 2)
+        excelChanged()
+    }
+
+    @objc func beginFileExcelExportForTest() {
+        excelPopup.selectItem(withTag: 1)
+        excelChanged()
+    }
+
+    @objc func exportBannerForTest() -> NSString {
+        banner.stringValue as NSString
     }
 
     @objc private func peekChanged() {
