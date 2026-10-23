@@ -16,6 +16,16 @@ fail() {
   exit 1
 }
 
+# PARQUET_COVERAGE is set by the fork's Sonar job. Normal CI keeps the
+# optimized build. Coverage compiles without -O so llvm-cov can see lines.
+typeset -a swift_opt clang_opt
+swift_opt=(-O)
+clang_opt=(-O2)
+if [[ "${PARQUET_COVERAGE:-}" == "1" ]]; then
+  swift_opt=(-profile-generate -profile-coverage-mapping)
+  clang_opt=(-O0 -fprofile-instr-generate -fcoverage-mapping)
+fi
+
 [[ -f "$LIB" ]] || fail "missing $LIB; run scripts/build.sh first"
 [[ -f "$FIXTURE" ]] || fail "missing fixture $FIXTURE"
 [[ -d "$APPEX" ]] || fail "missing appex; run scripts/build.sh first"
@@ -29,7 +39,7 @@ clang \
   -isysroot "$SDK_PATH" \
   -mmacosx-version-min=12.0 \
   -Wall -Wextra -Werror \
-  -O2 \
+  "${clang_opt[@]}" \
   -c "$ROOT_DIR/preview/extension/PreviewException.m" \
   -o "$BUILD_DIR/PreviewException.o"
 
@@ -37,7 +47,7 @@ clang \
   -isysroot "$SDK_PATH" \
   -mmacosx-version-min=12.0 \
   -Wall -Wextra -Werror \
-  -O2 \
+  "${clang_opt[@]}" \
   -c "$ROOT_DIR/Tests/preview_host_glue.m" \
   -o "$BUILD_DIR/preview_host_glue.o"
 
@@ -45,7 +55,7 @@ clang \
   -isysroot "$SDK_PATH" \
   -mmacosx-version-min=12.0 \
   -Wall -Wextra -Werror \
-  -O2 \
+  "${clang_opt[@]}" \
   -c "$ROOT_DIR/preview/extension/KeepPrincipal.m" \
   -o "$BUILD_DIR/KeepPrincipal.o"
 
@@ -75,7 +85,7 @@ EOF
 swiftc \
   -parse-as-library \
   -module-name ParquetQuickLookExtension \
-  -O \
+  "${swift_opt[@]}" \
   -import-objc-header "$ROOT_DIR/preview/extension/ParquetPreview.h" \
   "$ROOT_DIR"/preview/shared/*.swift \
   "$ROOT_DIR/preview/extension/PreviewProvider.swift" \
@@ -104,7 +114,7 @@ swiftc \
 codesign -s - -f --timestamp=none "$BUNDLE_DIR"
 
 swiftc \
-  -O \
+  "${swift_opt[@]}" \
   -import-objc-header "$ROOT_DIR/preview/extension/ParquetPreview.h" \
   "$ROOT_DIR/Tests/preview_host.swift" \
   "$BUILD_DIR/PreviewException.o" \

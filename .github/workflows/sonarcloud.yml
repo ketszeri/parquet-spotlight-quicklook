@@ -86,7 +86,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
         with:
           toolchain: stable
-          components: clippy
+          components: clippy,llvm-tools-preview
 
       - name: Install Build Wrapper
         id: build-wrapper
@@ -231,6 +231,9 @@ jobs:
           fi
           echo "---- sonar-project.properties ----"
           cat sonar-project.properties
+
+      - name: Measure coverage for Sonar
+        run: ./scripts/sonar_coverage.sh
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
