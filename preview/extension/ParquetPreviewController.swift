@@ -258,7 +258,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private var filterApplyCount = 0
     private var restoringEditor = false
     /// Host test. Forces the debounced reload path without a field editor.
-    private var filterEditHold = false
+    /// Field the host test pretends is being edited, so the reload stays debounced.
+    private var filterEditHoldField: NSTextField?
     private var lastFilterGeometry: FilterGeometry?
     private let chipRow = NSStackView()
     private let clearFiltersButton = NSButton(title: "Clear filters", target: nil, action: nil)
@@ -1354,7 +1355,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func fieldIsEditing(_ field: NSTextField) -> Bool {
-        if filterEditHold && (field === search || filterFields.contains(where: { $0 === field })) {
+        if let held = filterEditHoldField, held === field {
             return true
         }
         if field.currentEditor() != nil { return true }
@@ -1451,7 +1452,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         guard let field = filterFields.first else { return "fail no-field" }
         clearAllFilters()
         filterApplyCount = 0
-        filterEditHold = true
+        filterEditHoldField = field
         field.stringValue = "0"
         controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
         let immediate = filterApplyCount
@@ -1461,11 +1462,9 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
         let rows = numberOfRows(in: table)
         let reloads = filterApplyCount
-        let valid = filterReloadTimer?.isValid == true
-        let fire = filterReloadTimer.map { String(format: "%.3f", $0.fireDate.timeIntervalSinceNow) } ?? "none"
-        filterEditHold = false
+        filterEditHoldField = nil
         clearAllFilters()
-        return "immediate=\(immediate) reloads=\(reloads) rows=\(rows) valid=\(valid ? 1 : 0) fire=\(fire)" as NSString
+        return "immediate=\(immediate) reloads=\(reloads) rows=\(rows)" as NSString
     }
 
     @objc func exerciseFilterSheetForTest() -> NSString {
@@ -1714,6 +1713,12 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         query.columnFilters = [:]
         query.links = []
         suppressFilterEdits = true
+        // A leftover field editor would make the next assignment look like typing,
+        // so the reload would wait and the table would keep the old rows.
+        search.abortEditing()
+        for field in filterFields {
+            field.abortEditing()
+        }
         search.stringValue = ""
         for field in filterFields {
             field.stringValue = ""
