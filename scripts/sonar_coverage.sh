@@ -14,9 +14,13 @@ if [[ -f native/parquet_preview/Cargo.toml ]]; then
   if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
     cargo install cargo-llvm-cov --version 0.6.19 --locked --root "$ROOT/build/cargo-tools"
   fi
+  # src/bin is the fixture generator and tests/ is Rust test code. Both are
+  # excluded from the product analysis; leaving their 0% lines in LCOV would
+  # dilute the library report if a path failed to match the exclusion.
   cargo llvm-cov \
     --manifest-path native/parquet_preview/Cargo.toml \
     --locked \
+    --ignore-filename-regex '(src/bin/|/tests/)' \
     --lcov \
     --output-path "$ROOT/build/coverage/rust.lcov"
   python3 - "$ROOT" <<'PY'
@@ -57,15 +61,35 @@ export PARQUET_COVERAGE=1
 ./scripts/test_core.sh
 ./scripts/test_preview_host.sh
 
-xcrun llvm-profdata merge -sparse build/coverage/profraw/*.profraw -o build/coverage/swift.profdata
+shopt -s nullglob
+profraws=(build/coverage/profraw/*.profraw)
+echo "profraw files: ${#profraws[@]}"
+for prof in "${profraws[@]}"; do
+  echo "  $prof ($(wc -c < "$prof") bytes)"
+done
+if [[ ${#profraws[@]} -eq 0 ]]; then
+  echo "no profraw files were written" >&2
+  exit 1
+fi
+xcrun llvm-profdata merge -sparse "${profraws[@]}" -o build/coverage/swift.profdata
+# Export each binary on its own. A bare extra path is a source filter, and a
+# filter that matches nothing makes llvm-cov show write an empty report.
+# -object= is what actually adds the host and the preview bundle.
+: > build/coverage/swift.lcov
 objects=(
   build/tests/core_tests
   build/preview-host
   "build/ParquetPreviewTest.bundle/Contents/MacOS/ParquetPreview"
 )
-xcrun llvm-cov export -format=lcov -instr-profile build/coverage/swift.profdata "${objects[@]}" \
-  > build/coverage/swift.lcov
-xcrun llvm-cov show -instr-profile build/coverage/swift.profdata "${objects[@]}" \
+for obj in "${objects[@]}"; do
+  echo "llvm-cov export $obj"
+  xcrun llvm-cov export -format=lcov -instr-profile build/coverage/swift.profdata "$obj" >> build/coverage/swift.lcov
+done
+xcrun llvm-cov show \
+  -instr-profile build/coverage/swift.profdata \
+  build/tests/core_tests \
+  -object=build/preview-host \
+  -object="build/ParquetPreviewTest.bundle/Contents/MacOS/ParquetPreview" \
   > build/coverage/swift-llvm-cov.txt
 
 python3 - "$ROOT" <<'PY'
@@ -109,6 +133,22 @@ out.write_text("\n".join(parts) + "\n")
 covered = sum(1 for lines in files.values() for count in lines.values() if count > 0)
 total = sum(len(lines) for lines in files.values())
 print(f"generic coverage: {covered}/{total} lines in {len(files)} files")
+for path in sorted(files):
+    hit = sum(1 for count in files[path].values() if count > 0)
+    print(f"  {path}: {hit}/{len(files[path])}")
+controller = "preview/extension/ParquetPreviewController.swift"
+if controller not in files:
+    print("LCOV source files that were skipped or kept:", file=sys.stderr)
+    for line in report.read_text(errors="replace").splitlines():
+        if line.startswith("SF:"):
+            print(f"  {line[3:]}", file=sys.stderr)
+    sys.exit(
+        "generic coverage is missing preview/extension/ParquetPreviewController.swift; "
+        "the instrumented bundle did not contribute coverage"
+    )
+controller_hits = sum(1 for count in files[controller].values() if count > 0)
+if controller_hits == 0:
+    sys.exit("ParquetPreviewController.swift has coverage mapping but no covered lines")
 PY
 
 {
