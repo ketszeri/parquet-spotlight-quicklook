@@ -116,6 +116,45 @@ pub fn export_file(
     export_limited(source, dest, progress, EXCEL_DATA_ROWS_PER_SHEET)
 }
 
+struct HeldRows<I> {
+    incoming: I,
+    batch: Option<arrow_array::RecordBatch>,
+    row: usize,
+    done: bool,
+}
+
+enum Pull {
+    Ready,
+    Exhausted,
+}
+
+impl<I, E> HeldRows<I>
+where
+    I: Iterator<Item = Result<arrow_array::RecordBatch, E>>,
+{
+    fn needs_batch(&self) -> bool {
+        self.batch.as_ref().map(|batch| self.row >= batch.num_rows()).unwrap_or(true)
+    }
+
+    fn pull(&mut self) -> Result<Pull, ExportError> {
+        if !self.needs_batch() {
+            return Ok(Pull::Ready);
+        }
+        match self.incoming.next() {
+            Some(Ok(batch)) => {
+                self.batch = Some(batch);
+                self.row = 0;
+                Ok(Pull::Ready)
+            }
+            Some(Err(_)) => Err(ExportError::Message("export could not read the file")),
+            None => {
+                self.done = true;
+                Ok(Pull::Exhausted)
+            }
+        }
+    }
+}
+
 fn export_limited(
     source: &Path,
     dest: &Path,
@@ -143,6 +182,25 @@ fn export_limited(
         .map(|field| field.as_ref().clone())
         .collect();
     let names: Vec<String> = fields.iter().map(|field| field.name().clone()).collect();
+    let groups = collect_export_groups(&capped, metadata, shown, progress, &cancel, dest)?;
+    let mask = ProjectionMask::roots(arrow_meta.parquet_schema(), 0..shown);
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(capped, arrow_meta)
+        .with_projection(mask)
+        .with_row_groups(groups)
+        .with_batch_size(8192)
+        .build()
+        .map_err(|_| ExportError::Message("export could not read the file"))?;
+    write_export_sheets(reader, &fields, &names, shown, rows_per_sheet, dest, progress)
+}
+
+fn collect_export_groups(
+    capped: &CappedFile,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    shown: usize,
+    progress: *mut ExportProgress,
+    cancel: &AtomicBool,
+    dest: &Path,
+) -> Result<Vec<usize>, ExportError> {
     let mut groups = Vec::new();
     for group in 0..metadata.num_row_groups() {
         if cancel_requested(progress) {
@@ -151,7 +209,7 @@ fn export_limited(
             return Err(ExportError::Message("export cancelled"));
         }
         preflight::preflight_one_group(
-            &capped,
+            capped,
             metadata,
             group,
             shown,
@@ -160,101 +218,58 @@ fn export_limited(
         )?;
         groups.push(group);
     }
-    let mask = ProjectionMask::roots(arrow_meta.parquet_schema(), 0..shown);
-    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(capped, arrow_meta)
-        .with_projection(mask)
-        .with_row_groups(groups)
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| ExportError::Message("export could not read the file"))?;
+    Ok(groups)
+}
 
+fn write_export_sheets<I, E>(
+    batches: I,
+    fields: &[arrow_schema::Field],
+    names: &[String],
+    shown: usize,
+    rows_per_sheet: u32,
+    dest: &Path,
+    progress: *mut ExportProgress,
+) -> Result<(), ExportError>
+where
+    I: Iterator<Item = Result<arrow_array::RecordBatch, E>>,
+{
     let mut workbook = Workbook::new();
     let date_format = Format::new().set_num_format("yyyy-mm-dd");
     let time_format = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
     let header_format = Format::new().set_bold();
-    let mut batches = reader;
-    let mut held: Option<arrow_array::RecordBatch> = None;
-    let mut held_row = 0usize;
+    let mut held = HeldRows { incoming: batches, batch: None, row: 0, done: false };
     let mut sheet_index = 0usize;
-    let mut written_total: u64 = 0;
-    let mut reader_done = false;
+    let mut written_total = 0u64;
     loop {
         if cancel_requested(progress) {
             let _ = std::fs::remove_file(dest);
             return Err(ExportError::Message("export cancelled"));
         }
-        if held.as_ref().map(|batch| held_row >= batch.num_rows()).unwrap_or(true) {
-            match batches.next() {
-                Some(Ok(batch)) => {
-                    held = Some(batch);
-                    held_row = 0;
-                }
-                Some(Err(_)) => return Err(ExportError::Message("export could not read the file")),
-                None => {
-                    reader_done = true;
-                    if written_total > 0 || sheet_index > 0 {
-                        break;
-                    }
+        match held.pull()? {
+            Pull::Exhausted => {
+                if written_total > 0 || sheet_index > 0 {
+                    break;
                 }
             }
+            Pull::Ready => {}
         }
-        let worksheet = workbook
-            .add_worksheet_with_constant_memory()
-            .map_err(|_| ExportError::Message("export could not open a worksheet"))?;
-        worksheet
-            .set_name(sheet_name(sheet_index))
-            .map_err(|_| ExportError::Message("export could not name a worksheet"))?;
-        worksheet.set_freeze_panes(1, 0).ok();
-        let last_col = (shown - 1) as u16;
-        for (col, name) in names.iter().enumerate() {
-            worksheet
-                .write_string_with_format(0, col as u16, sanitize_excel_text(name).as_ref(), &header_format)
-                .map_err(|_| ExportError::Message("export could not write the header"))?;
-        }
-        let mut sheet_written: u32 = 0;
-        while sheet_written < rows_per_sheet {
-            if cancel_requested(progress) {
-                let _ = std::fs::remove_file(dest);
-                return Err(ExportError::Message("export cancelled"));
-            }
-            if held.as_ref().map(|batch| held_row >= batch.num_rows()).unwrap_or(true) {
-                match batches.next() {
-                    Some(Ok(batch)) => {
-                        held = Some(batch);
-                        held_row = 0;
-                    }
-                    Some(Err(_)) => return Err(ExportError::Message("export could not read the file")),
-                    None => {
-                        reader_done = true;
-                        break;
-                    }
-                }
-            }
-            let batch = held.as_ref().ok_or(ExportError::Message("export could not read the file"))?;
-            let excel_row = sheet_written + 1;
-            for col in 0..shown {
-                let array = batch.column(col);
-                write_arrow_cell(
-                    worksheet,
-                    excel_row,
-                    col as u16,
-                    Some(&fields[col]),
-                    array,
-                    held_row,
-                    &date_format,
-                    &time_format,
-                )?;
-            }
-            held_row += 1;
-            sheet_written += 1;
-            written_total += 1;
-            publish(progress, written_total, None);
-        }
-        if sheet_written > 0 {
-            worksheet.autofilter(0, 0, sheet_written, last_col).ok();
-        }
+        write_one_sheet(
+            &mut workbook,
+            &mut held,
+            fields,
+            names,
+            shown,
+            rows_per_sheet,
+            sheet_index,
+            &mut written_total,
+            &date_format,
+            &time_format,
+            &header_format,
+            dest,
+            progress,
+        )?;
         sheet_index += 1;
-        if reader_done {
+        if held.done {
             break;
         }
     }
@@ -262,6 +277,104 @@ fn export_limited(
         .save(dest)
         .map_err(|_| ExportError::Message("export could not save the workbook"))?;
     Ok(())
+}
+
+fn write_one_sheet<I, E>(
+    workbook: &mut Workbook,
+    held: &mut HeldRows<I>,
+    fields: &[arrow_schema::Field],
+    names: &[String],
+    shown: usize,
+    rows_per_sheet: u32,
+    sheet_index: usize,
+    written_total: &mut u64,
+    date_format: &Format,
+    time_format: &Format,
+    header_format: &Format,
+    dest: &Path,
+    progress: *mut ExportProgress,
+) -> Result<(), ExportError>
+where
+    I: Iterator<Item = Result<arrow_array::RecordBatch, E>>,
+{
+    let worksheet = workbook
+        .add_worksheet_with_constant_memory()
+        .map_err(|_| ExportError::Message("export could not open a worksheet"))?;
+    worksheet
+        .set_name(sheet_name(sheet_index))
+        .map_err(|_| ExportError::Message("export could not name a worksheet"))?;
+    worksheet.set_freeze_panes(1, 0).ok();
+    let last_col = (shown - 1) as u16;
+    for (col, name) in names.iter().enumerate() {
+        worksheet
+            .write_string_with_format(0, col as u16, sanitize_excel_text(name).as_ref(), header_format)
+            .map_err(|_| ExportError::Message("export could not write the header"))?;
+    }
+    let sheet_written = fill_sheet(
+        worksheet,
+        held,
+        fields,
+        shown,
+        rows_per_sheet,
+        written_total,
+        date_format,
+        time_format,
+        dest,
+        progress,
+    )?;
+    if sheet_written > 0 {
+        worksheet.autofilter(0, 0, sheet_written, last_col).ok();
+    }
+    Ok(())
+}
+
+fn fill_sheet<I, E>(
+    worksheet: &mut rust_xlsxwriter::Worksheet,
+    held: &mut HeldRows<I>,
+    fields: &[arrow_schema::Field],
+    shown: usize,
+    rows_per_sheet: u32,
+    written_total: &mut u64,
+    date_format: &Format,
+    time_format: &Format,
+    dest: &Path,
+    progress: *mut ExportProgress,
+) -> Result<u32, ExportError>
+where
+    I: Iterator<Item = Result<arrow_array::RecordBatch, E>>,
+{
+    let mut sheet_written = 0u32;
+    while sheet_written < rows_per_sheet {
+        if cancel_requested(progress) {
+            let _ = std::fs::remove_file(dest);
+            return Err(ExportError::Message("export cancelled"));
+        }
+        match held.pull()? {
+            Pull::Exhausted => break,
+            Pull::Ready => {}
+        }
+        let row_index = held.row;
+        let batch = held.batch.as_ref().ok_or(ExportError::Message("export could not read the file"))?;
+        let excel_row = sheet_written + 1;
+        for col in 0..shown {
+            let array = batch.column(col);
+            write_arrow_cell(
+                worksheet,
+                excel_row,
+                col as u16,
+                Some(&fields[col]),
+                array,
+                row_index,
+                date_format,
+                time_format,
+            )?;
+        }
+        held.row += 1;
+        sheet_written += 1;
+        *written_total += 1;
+        publish(progress, *written_total, None);
+    }
+    Ok(sheet_written)
 }
 
 #[derive(Debug, Deserialize)]

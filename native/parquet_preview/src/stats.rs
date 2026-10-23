@@ -140,12 +140,49 @@ impl FileStats {
     }
 }
 
+struct StatsSource {
+    arrow_meta: ArrowReaderMetadata,
+    capped: CappedFile,
+    budget: Arc<Budget>,
+    file_rows: i64,
+    total_columns: usize,
+    shown: usize,
+}
+
 pub fn stats_path(
     path: &Path,
     limits: StatsLimits,
     cancel: Arc<AtomicBool>,
 ) -> Result<FileStats, PreviewError> {
     let limits = limits.sanitized();
+    let source = open_stats(path, &limits, &cancel)?;
+    let file_rows = source.file_rows;
+    let total_columns = source.total_columns;
+    let shown = source.shown;
+    let mut columns = footer_columns(&source);
+    let (mut scanned_rows, mut partial) = scan_stats(source, &mut columns, &cancel)?;
+    if scanned_rows < file_rows.max(0) as u64 {
+        partial = true;
+    }
+    // An empty file is complete, not partial.
+    if file_rows <= 0 {
+        partial = false;
+        scanned_rows = 0;
+    }
+    Ok(FileStats {
+        file_rows,
+        scanned_rows,
+        partial,
+        total_columns,
+        shown_columns: shown,
+        columns: columns
+            .into_iter()
+            .map(|column| column.finish(file_rows, scanned_rows, partial))
+            .collect(),
+    })
+}
+
+fn open_stats(path: &Path, limits: &StatsLimits, cancel: &Arc<AtomicBool>) -> Result<StatsSource, PreviewError> {
     let meta = std::fs::metadata(path).map_err(|_| PreviewError::Io)?;
     if !meta.is_file() {
         return Err(PreviewError::NotAFile);
@@ -153,7 +190,7 @@ pub fn stats_path(
     let file = File::open(path).map_err(|_| PreviewError::Io)?;
     let len = meta.len();
     let deadline = Instant::now() + Duration::from_millis(u64::from(limits.max_millis));
-    let budget = Budget::new(limits.max_bytes, deadline, Arc::clone(&cancel));
+    let budget = Budget::new(limits.max_bytes, deadline, Arc::clone(cancel));
     let capped = CappedFile::new(file, len, Arc::clone(&budget));
     if capped.byte_len() < 12 {
         return Err(PreviewError::NotParquet);
@@ -167,103 +204,133 @@ pub fn stats_path(
     }
     let arrow_meta = ArrowReaderMetadata::load(&capped, Default::default()).map_err(|_| PreviewError::Decode)?;
     let metadata = Arc::clone(arrow_meta.metadata());
-    let file_rows = metadata.file_metadata().num_rows();
-    let fields = arrow_meta.schema().fields().clone();
-    let total_columns = fields.len();
-    let shown = total_columns.min(limits.max_columns as usize);
-    let schema = metadata.file_metadata().schema_descr();
-    let mut columns = Vec::with_capacity(shown);
-    for (index, field) in fields.iter().take(shown).enumerate() {
-        let footer = footer_for_root(metadata.row_groups(), schema, index);
-        columns.push(ColumnAccum::new(field, footer));
-    }
+    let total_columns = arrow_meta.schema().fields().len();
+    Ok(StatsSource {
+        file_rows: metadata.file_metadata().num_rows(),
+        total_columns,
+        shown: total_columns.min(limits.max_columns as usize),
+        arrow_meta,
+        capped,
+        budget,
+    })
+}
 
-    let mut scanned_rows: u64 = 0;
+fn footer_columns(source: &StatsSource) -> Vec<ColumnAccum> {
+    let metadata = source.arrow_meta.metadata();
+    let schema = metadata.file_metadata().schema_descr();
+    let fields = source.arrow_meta.schema().fields().clone();
+    fields
+        .iter()
+        .take(source.shown)
+        .enumerate()
+        .map(|(index, field)| {
+            let footer = footer_for_root(metadata.row_groups(), schema, index);
+            ColumnAccum::new(field, footer)
+        })
+        .collect()
+}
+
+fn scan_stats(
+    source: StatsSource,
+    columns: &mut [ColumnAccum],
+    cancel: &AtomicBool,
+) -> Result<(u64, bool), PreviewError> {
+    if source.shown == 0 || source.file_rows <= 0 {
+        return Ok((0, false));
+    }
+    let metadata = Arc::clone(source.arrow_meta.metadata());
+    let (row_groups, mut partial) = select_stats_groups(&source, &metadata, cancel)?;
+    if row_groups.len() < metadata.num_row_groups() {
+        partial = true;
+    }
+    if row_groups.is_empty() {
+        return Ok((0, partial));
+    }
+    let (scanned_rows, scan_partial) = read_stats_batches(source, row_groups, columns, cancel)?;
+    Ok((scanned_rows, partial || scan_partial))
+}
+
+fn select_stats_groups(
+    source: &StatsSource,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    cancel: &AtomicBool,
+) -> Result<(Vec<usize>, bool), PreviewError> {
+    let mut row_groups = Vec::new();
     let mut partial = false;
-    if shown > 0 && file_rows > 0 {
-        let mut row_groups = Vec::new();
-        for group in 0..metadata.num_row_groups() {
-            if budget.expired() || cancel.load(Ordering::Relaxed) {
+    for group in 0..metadata.num_row_groups() {
+        if source.budget.expired() || cancel.load(Ordering::Relaxed) {
+            partial = true;
+            break;
+        }
+        match preflight::preflight_one_group(
+            &source.capped,
+            metadata,
+            group,
+            source.shown,
+            GROUP_UNCOMPRESSED_CAP,
+            crate::limits::HARD_MAX_UNCOMPRESSED,
+        ) {
+            Ok(()) => row_groups.push(group),
+            Err(PreviewError::PageTooLarge) => return Err(PreviewError::PageTooLarge),
+            Err(_) => {
                 partial = true;
                 break;
             }
-            match preflight::preflight_one_group(
-                &capped,
-                &metadata,
-                group,
-                shown,
-                GROUP_UNCOMPRESSED_CAP,
-                crate::limits::HARD_MAX_UNCOMPRESSED,
-            ) {
-                Ok(()) => row_groups.push(group),
-                Err(PreviewError::PageTooLarge) => return Err(PreviewError::PageTooLarge),
-                Err(_) => {
-                    partial = true;
-                    break;
-                }
-            }
-        }
-        if row_groups.len() < metadata.num_row_groups() {
-            partial = true;
-        }
-        if !row_groups.is_empty() {
-            let mask = ProjectionMask::roots(arrow_meta.parquet_schema(), 0..shown);
-            let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(capped, arrow_meta)
-                .with_projection(mask)
-                .with_row_groups(row_groups)
-                .with_batch_size(BATCH_ROWS)
-                .build()
-                .map_err(|_| PreviewError::Decode)?;
-            for batch in reader {
-                if budget.expired() || cancel.load(Ordering::Relaxed) {
-                    partial = true;
-                    break;
-                }
-                let batch = match batch {
-                    Ok(batch) => batch,
-                    Err(_) => {
-                        if scanned_rows == 0 {
-                            return Err(budget.take_reason().unwrap_or(PreviewError::Decode));
-                        }
-                        partial = true;
-                        break;
-                    }
-                };
-                let batch_fields = batch.schema().fields().clone();
-                for row in 0..batch.num_rows() {
-                    for (index, column) in columns.iter_mut().enumerate() {
-                        if index >= batch.num_columns() {
-                            column.observe_missing();
-                            continue;
-                        }
-                        let field = batch_fields.get(index).map(|field| field.as_ref());
-                        column.observe(field, batch.column(index), row);
-                    }
-                    scanned_rows += 1;
-                }
-            }
         }
     }
-    if scanned_rows < file_rows.max(0) as u64 {
-        partial = true;
-    }
-    // An empty file is complete, not partial.
-    if file_rows <= 0 {
-        partial = false;
-        scanned_rows = 0;
-    }
+    Ok((row_groups, partial))
+}
 
-    Ok(FileStats {
-        file_rows,
-        scanned_rows,
-        partial,
-        total_columns,
-        shown_columns: shown,
-        columns: columns
-            .into_iter()
-            .map(|column| column.finish(file_rows, scanned_rows, partial))
-            .collect(),
-    })
+fn read_stats_batches(
+    source: StatsSource,
+    row_groups: Vec<usize>,
+    columns: &mut [ColumnAccum],
+    cancel: &AtomicBool,
+) -> Result<(u64, bool), PreviewError> {
+    let budget = Arc::clone(&source.budget);
+    let shown = source.shown;
+    let mask = ProjectionMask::roots(source.arrow_meta.parquet_schema(), 0..shown);
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(source.capped, source.arrow_meta)
+        .with_projection(mask)
+        .with_row_groups(row_groups)
+        .with_batch_size(BATCH_ROWS)
+        .build()
+        .map_err(|_| PreviewError::Decode)?;
+    let mut scanned_rows = 0u64;
+    let mut partial = false;
+    for batch in reader {
+        if budget.expired() || cancel.load(Ordering::Relaxed) {
+            partial = true;
+            break;
+        }
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(_) => {
+                if scanned_rows == 0 {
+                    return Err(budget.take_reason().unwrap_or(PreviewError::Decode));
+                }
+                partial = true;
+                break;
+            }
+        };
+        observe_stats_batch(columns, &batch, &mut scanned_rows);
+    }
+    Ok((scanned_rows, partial))
+}
+
+fn observe_stats_batch(columns: &mut [ColumnAccum], batch: &arrow_array::RecordBatch, scanned_rows: &mut u64) {
+    let batch_fields = batch.schema().fields().clone();
+    for row in 0..batch.num_rows() {
+        for (index, column) in columns.iter_mut().enumerate() {
+            if index >= batch.num_columns() {
+                column.observe_missing();
+                continue;
+            }
+            let field = batch_fields.get(index).map(|field| field.as_ref());
+            column.observe(field, batch.column(index), row);
+        }
+        *scanned_rows += 1;
+    }
 }
 
 struct FooterBits {
@@ -356,50 +423,55 @@ fn stat_bound(stats: &Statistics, logical: Option<&LogicalType>, want_min: bool)
     }
     match stats {
         Statistics::Boolean(value) => {
-            let bit = if want_min { value.min_opt()? } else { value.max_opt()? };
-            let text = if *bit { "true" } else { "false" };
-            Some((OrderKey::Int(i128::from(*bit)), text.to_string()))
+            let bit = *end_ref(want_min, value.min_opt(), value.max_opt())?;
+            Some(boolean_text(bit))
         }
         Statistics::Int32(value) => {
-            let raw = if want_min { *value.min_opt()? } else { *value.max_opt()? };
+            let raw = *end_ref(want_min, value.min_opt(), value.max_opt())?;
             Some(format_int_logical(i128::from(raw), logical, true))
         }
         Statistics::Int64(value) => {
-            let raw = if want_min { *value.min_opt()? } else { *value.max_opt()? };
+            let raw = *end_ref(want_min, value.min_opt(), value.max_opt())?;
             Some(format_int_logical(i128::from(raw), logical, false))
         }
         Statistics::Float(value) => {
-            let raw = if want_min { *value.min_opt()? } else { *value.max_opt()? };
+            let raw = *end_ref(want_min, value.min_opt(), value.max_opt())?;
             finite_float(f64::from(raw))
         }
         Statistics::Double(value) => {
-            let raw = if want_min { *value.min_opt()? } else { *value.max_opt()? };
+            let raw = *end_ref(want_min, value.min_opt(), value.max_opt())?;
             finite_float(raw)
         }
-        Statistics::ByteArray(value) => {
-            let raw = if want_min { value.min_opt()? } else { value.max_opt()? };
-            let text = String::from_utf8_lossy(raw.data()).trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some((OrderKey::Text(text.clone()), clip_text(&text)))
-            }
-        }
-        Statistics::FixedLenByteArray(value) => {
-            let raw = if want_min { value.min_opt()? } else { value.max_opt()? };
-            if matches!(logical, Some(LogicalType::Uuid)) && raw.data().len() == 16 {
-                let text = format_uuid_bytes(raw.data());
-                return Some((OrderKey::Text(text.clone()), text));
-            }
-            let text = String::from_utf8_lossy(raw.data()).trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some((OrderKey::Text(text.clone()), clip_text(&text)))
-            }
-        }
+        Statistics::ByteArray(value) => text_stat(end_ref(want_min, value.min_opt(), value.max_opt())?.data()),
+        Statistics::FixedLenByteArray(value) => fixed_stat(end_ref(want_min, value.min_opt(), value.max_opt())?.data(), logical),
         Statistics::Int96(_) => None,
     }
+}
+
+fn end_ref<'a, T>(want_min: bool, min: Option<&'a T>, max: Option<&'a T>) -> Option<&'a T> {
+    if want_min { min } else { max }
+}
+
+fn boolean_text(bit: bool) -> (OrderKey, String) {
+    let text = if bit { "true" } else { "false" };
+    (OrderKey::Int(i128::from(bit)), text.to_string())
+}
+
+fn text_stat(bytes: &[u8]) -> Option<(OrderKey, String)> {
+    let text = String::from_utf8_lossy(bytes).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some((OrderKey::Text(text.clone()), clip_text(&text)))
+    }
+}
+
+fn fixed_stat(bytes: &[u8], logical: Option<&LogicalType>) -> Option<(OrderKey, String)> {
+    if matches!(logical, Some(LogicalType::Uuid)) && bytes.len() == 16 {
+        let text = format_uuid_bytes(bytes);
+        return Some((OrderKey::Text(text.clone()), text));
+    }
+    text_stat(bytes)
 }
 
 fn format_int_logical(raw: i128, logical: Option<&LogicalType>, from_i32: bool) -> (OrderKey, String) {

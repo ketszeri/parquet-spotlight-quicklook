@@ -76,6 +76,16 @@ impl Preview {
     }
 }
 
+struct OpenedPreview {
+    arrow_meta: ArrowReaderMetadata,
+    capped: CappedFile,
+    budget: Arc<Budget>,
+    columns: Vec<PreviewColumn>,
+    total_columns: usize,
+    shown_columns: usize,
+    file_rows: i64,
+}
+
 pub fn decode_file(
     path: &Path,
     limits: Limits,
@@ -84,6 +94,44 @@ pub fn decode_file(
     if cancel.load(Ordering::Relaxed) {
         return Err(PreviewError::Timeout);
     }
+    let opened = open_preview(path, limits, cancel)?;
+    let columns = opened.columns.clone();
+    let total_columns = opened.total_columns;
+    let shown_columns = opened.shown_columns;
+    let file_rows = opened.file_rows;
+    if shown_columns == 0 || file_rows == 0 {
+        return Ok(assemble_preview(columns, Vec::new(), total_columns, shown_columns, file_rows));
+    }
+    let metadata = Arc::clone(opened.arrow_meta.metadata());
+    let row_groups = select_row_groups(&metadata, limits.max_rows);
+    preflight::preflight_row_groups(&opened.capped, &metadata, &row_groups, shown_columns)
+        .map_err(|error| opened.budget.take_reason().unwrap_or(error))?;
+    if opened.budget.expired() {
+        return Err(opened.budget.take_reason().unwrap_or(PreviewError::Timeout));
+    }
+    let rows = read_preview_rows(opened, limits, row_groups)?;
+    Ok(assemble_preview(columns, rows, total_columns, shown_columns, file_rows))
+}
+
+fn assemble_preview(
+    columns: Vec<PreviewColumn>,
+    rows: Vec<Vec<PreviewCell>>,
+    total_columns: usize,
+    shown_columns: usize,
+    file_rows: i64,
+) -> Preview {
+    Preview {
+        shown_rows: rows.len(),
+        columns,
+        rows,
+        total_columns,
+        shown_columns,
+        hidden_columns: total_columns.saturating_sub(shown_columns),
+        file_rows,
+    }
+}
+
+fn open_preview(path: &Path, limits: Limits, cancel: Arc<AtomicBool>) -> Result<OpenedPreview, PreviewError> {
     let meta = std::fs::metadata(path).map_err(|_| PreviewError::Io)?;
     if !meta.is_file() {
         return Err(PreviewError::NotAFile);
@@ -97,10 +145,8 @@ pub fn decode_file(
         return Err(PreviewError::NotParquet);
     }
     confirm_magic(&capped, &budget)?;
-
-    let arrow_meta = ArrowReaderMetadata::load(&capped, Default::default()).map_err(|error| {
-        classify(&budget, error)
-    })?;
+    let arrow_meta = ArrowReaderMetadata::load(&capped, Default::default())
+        .map_err(|error| classify(&budget, error))?;
     let metadata = Arc::clone(arrow_meta.metadata());
     let file_rows = metadata.file_metadata().num_rows();
     let fields = arrow_meta.schema().fields().clone();
@@ -114,91 +160,122 @@ pub fn decode_file(
             type_name: format::type_name(field),
         })
         .collect::<Vec<_>>();
+    Ok(OpenedPreview {
+        arrow_meta,
+        capped,
+        budget,
+        columns,
+        total_columns,
+        shown_columns,
+        file_rows,
+    })
+}
 
-    if shown_columns == 0 || file_rows == 0 {
-        return Ok(Preview {
-            columns,
-            rows: Vec::new(),
-            total_columns,
-            shown_columns,
-            hidden_columns: total_columns.saturating_sub(shown_columns),
-            shown_rows: 0,
-            file_rows,
-        });
-    }
-
-    let row_groups = select_row_groups(&metadata, limits.max_rows);
-    preflight::preflight_row_groups(&capped, &metadata, &row_groups, shown_columns)
-        .map_err(|error| budget.take_reason().unwrap_or(error))?;
-
-    if budget.expired() {
-        return Err(budget.take_reason().unwrap_or(PreviewError::Timeout));
-    }
-
-    let mask = ProjectionMask::roots(arrow_meta.parquet_schema(), 0..shown_columns);
-    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(capped, arrow_meta)
+fn read_preview_rows(
+    opened: OpenedPreview,
+    limits: Limits,
+    row_groups: Vec<usize>,
+) -> Result<Vec<Vec<PreviewCell>>, PreviewError> {
+    let shown_columns = opened.shown_columns;
+    let budget = Arc::clone(&opened.budget);
+    let mask = ProjectionMask::roots(opened.arrow_meta.parquet_schema(), 0..shown_columns);
+    let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(opened.capped, opened.arrow_meta)
         .with_projection(mask)
         .with_row_groups(row_groups)
         .with_batch_size(limits.max_rows as usize)
         .with_limit(limits.max_rows as usize)
         .build()
         .map_err(|error| classify(&budget, error))?;
-
     let mut rows = Vec::new();
-    let mut rendered_bytes: usize = 0;
+    let mut rendered_bytes = 0usize;
     for batch in reader {
         if budget.expired() {
             return Err(budget.take_reason().unwrap_or(PreviewError::Timeout));
         }
         let batch = batch.map_err(|error| classify(&budget, error))?;
-        let batch_fields = batch.schema().fields().clone();
-        for row_index in 0..batch.num_rows() {
-            if rows.len() >= limits.max_rows as usize {
-                break;
-            }
-            let mut cells = Vec::with_capacity(shown_columns);
-            let mut over_budget = false;
-            for column_index in 0..shown_columns {
-                let cell = if column_index < batch.num_columns() {
-                    if let Some(field) = batch_fields.get(column_index) {
-                        format::format_cell(field.as_ref(), batch.column(column_index), row_index).into()
-                    } else {
-                        null_cell()
-                    }
-                } else {
-                    null_cell()
-                };
-                rendered_bytes = rendered_bytes.saturating_add(
-                    cell.text.as_ref().map(|text| text.len()).unwrap_or(0),
-                );
-                if rendered_bytes > 12 * 1024 * 1024 {
-                    over_budget = true;
-                    break;
-                }
-                cells.push(cell);
-            }
-            if over_budget {
+        let keep_reading = append_preview_batch(
+            &mut rows,
+            &mut rendered_bytes,
+            &batch,
+            limits.max_rows,
+            shown_columns,
+        )?;
+        if !keep_reading {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+/// `false` stops the reader because the row cap was reached. A render-size
+/// stop still returns `true` when rows remain under the cap, so later batches
+/// keep the budget check the previous loop performed.
+fn append_preview_batch(
+    rows: &mut Vec<Vec<PreviewCell>>,
+    rendered_bytes: &mut usize,
+    batch: &arrow_array::RecordBatch,
+    max_rows: u32,
+    shown_columns: usize,
+) -> Result<bool, PreviewError> {
+    let batch_fields = batch.schema().fields().clone();
+    for row_index in 0..batch.num_rows() {
+        if rows.len() >= max_rows as usize {
+            return Ok(false);
+        }
+        match render_preview_row(batch, &batch_fields, row_index, shown_columns, *rendered_bytes) {
+            RenderedRow::TooLarge { rendered_bytes: next } => {
+                *rendered_bytes = next;
                 if rows.is_empty() {
                     return Err(PreviewError::MemoryLimit);
                 }
                 break;
             }
-            rows.push(cells);
-        }
-        if rows.len() >= limits.max_rows as usize {
-            break;
+            RenderedRow::Cells { cells, rendered_bytes: next } => {
+                *rendered_bytes = next;
+                rows.push(cells);
+            }
         }
     }
+    Ok(rows.len() < max_rows as usize)
+}
 
-    Ok(Preview {
-        shown_rows: rows.len(),
-        columns,
-        rows,
-        total_columns,
-        shown_columns,
-        hidden_columns: total_columns.saturating_sub(shown_columns),
-        file_rows,
-    })
+enum RenderedRow {
+    TooLarge { rendered_bytes: usize },
+    Cells { cells: Vec<PreviewCell>, rendered_bytes: usize },
+}
+
+fn render_preview_row(
+    batch: &arrow_array::RecordBatch,
+    batch_fields: &arrow_schema::Fields,
+    row_index: usize,
+    shown_columns: usize,
+    mut rendered_bytes: usize,
+) -> RenderedRow {
+    let mut cells = Vec::with_capacity(shown_columns);
+    for column_index in 0..shown_columns {
+        let cell = preview_cell_at(batch, batch_fields, row_index, column_index);
+        rendered_bytes = rendered_bytes.saturating_add(cell.text.as_ref().map(|text| text.len()).unwrap_or(0));
+        if rendered_bytes > 12 * 1024 * 1024 {
+            return RenderedRow::TooLarge { rendered_bytes };
+        }
+        cells.push(cell);
+    }
+    RenderedRow::Cells { cells, rendered_bytes }
+}
+
+fn preview_cell_at(
+    batch: &arrow_array::RecordBatch,
+    batch_fields: &arrow_schema::Fields,
+    row_index: usize,
+    column_index: usize,
+) -> PreviewCell {
+    if column_index >= batch.num_columns() {
+        return null_cell();
+    }
+    match batch_fields.get(column_index) {
+        Some(field) => format::format_cell(field.as_ref(), batch.column(column_index), row_index).into(),
+        None => null_cell(),
+    }
 }
 
 fn null_cell() -> PreviewCell {
