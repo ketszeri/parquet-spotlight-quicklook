@@ -321,14 +321,10 @@ if expected == "rows" && mode == "marker" {
         "max-click=false",
         "median-click=false",
         "mean-click=false",
-        "p25 chip=id ≥ p25",
-        "p25 texts=1,2",
-        "p75 chip=id ≥ p75",
-        "p75 texts=2",
-        "p95 chip=id ≥ p95",
-        "p95 texts=2",
-        "p99 chip=id ≥ p99",
-        "p99 texts=2",
+        "p25 chip=id ≥ p25 (0.5) rows=2 texts=1,2",
+        "p75 chip=id ≥ p75 (1.5) rows=1 texts=2",
+        "p95 chip=id ≥ p95 (1.9) rows=1 texts=2",
+        "p99 chip=id ≥ p99 (1.98) rows=1 texts=2",
         "kept=true still=1"
     ]
     for piece in required where !links.contains(piece) {
