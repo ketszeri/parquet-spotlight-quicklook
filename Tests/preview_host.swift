@@ -172,20 +172,38 @@ if expected == "rows" && mode == "marker" {
         exit(1)
     }
     fputs("filter editing \(editing)\n", stderr)
-    let editingRequired = [
-        "editor=1",
-        "panel=0",
-        "text=0",
-        "survived=1",
-        "immediate=0",
-        "reloads=1",
-        "rows=1",
-        "same=1",
-        "writes=0",
-        "restored=1"
-    ]
-    for piece in editingRequired where !editing.contains(piece) {
-        fputs("filter editing missing \(piece)\n", stderr)
+    if editing.contains("editor=1") {
+        let editingRequired = [
+            "key=1",
+            "panel=0",
+            "text=0",
+            "survived=1",
+            "immediate=0",
+            "reloads=1",
+            "rows=1",
+            "same=1",
+            "writes=0",
+            "restored=1"
+        ]
+        for piece in editingRequired where !editing.contains(piece) {
+            fputs("filter editing missing \(piece)\n", stderr)
+            exit(1)
+        }
+    } else {
+        let fallbackRequired = ["key=0", "editor=0", "panel=1", "fallback-rows=1", "same=1", "writes=0"]
+        for piece in fallbackRequired where !editing.contains(piece) {
+            fputs("filter editing missing \(piece)\n", stderr)
+            exit(1)
+        }
+    }
+    guard let debounced = viewController.perform(NSSelectorFromString("exerciseFilterDebounceForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter debounce exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter debounce \(debounced)\n", stderr)
+    for piece in ["immediate=0", "reloads=1", "rows=1"] where !debounced.contains(piece) {
+        fputs("filter debounce missing \(piece)\n", stderr)
         exit(1)
     }
     guard let sheet = viewController.perform(NSSelectorFromString("exerciseFilterSheetForTest"))?
@@ -194,8 +212,17 @@ if expected == "rows" && mode == "marker" {
         exit(1)
     }
     fputs("filter sheet \(sheet)\n", stderr)
-    for piece in ["panel=1", "sheet=1", "text=1", "rows=1", "cleared=3"] where !sheet.contains(piece) {
+    for piece in ["panel=1", "text=1", "rows=1", "cleared=3"] where !sheet.contains(piece) {
         fputs("filter sheet missing \(piece)\n", stderr)
+        exit(1)
+    }
+    if sheet.contains("key=1") {
+        if !sheet.contains("sheet=1") {
+            fputs("a key window should present the filter as a sheet\n", stderr)
+            exit(1)
+        }
+    } else if !sheet.contains("key=0") || !sheet.contains("sheet=0") {
+        fputs("a window that is not key should present a floating filter panel\n", stderr)
         exit(1)
     }
     guard let standalone = viewController.perform(NSSelectorFromString("exerciseFilterStandalonePanelForTest"))?

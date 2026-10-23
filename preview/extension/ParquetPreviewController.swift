@@ -134,6 +134,10 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.exerciseFilterEditingForTest() ?? "no-view"
     }
 
+    @objc func exerciseFilterDebounceForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterDebounceForTest() ?? "no-view"
+    }
+
     @objc func exerciseFilterSheetForTest() -> NSString {
         (view as? ParquetQuickLookView)?.exerciseFilterSheetForTest() ?? "no-view"
     }
@@ -253,6 +257,8 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private var filterReloadTimer: Timer?
     private var filterApplyCount = 0
     private var restoringEditor = false
+    /// Host test. Forces the debounced reload path without a field editor.
+    private var filterEditHold = false
     private var lastFilterGeometry: FilterGeometry?
     private let chipRow = NSStackView()
     private let clearFiltersButton = NSButton(title: "Clear filters", target: nil, action: nil)
@@ -1346,6 +1352,9 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func fieldIsEditing(_ field: NSTextField) -> Bool {
+        if filterEditHold && (field === search || filterFields.contains(where: { $0 === field })) {
+            return true
+        }
         if field.currentEditor() != nil { return true }
         guard let editor = field.window?.firstResponder as? NSTextView else { return false }
         return (editor.delegate as AnyObject) === field
@@ -1392,6 +1401,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         guard sendMouseDown(to: field) else { return "fail event" }
         let editor = field.currentEditor() != nil
         let panelShown = filterInputPanel.isShownForTest
+        let key = window.isKeyWindow
         let writesBefore = FilterFieldLayout.frameWritesForTest
         if let editorView = field.currentEditor() as? NSTextView {
             let length = (editorView.string as NSString).length
@@ -1403,9 +1413,16 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         let text = editorText(field)
         let survived = text == "0" && field.currentEditor() != nil
         let immediate = filterApplyCount
-        let deadline = Date().addingTimeInterval(0.5)
-        while filterApplyCount < 1 && Date() < deadline {
-            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+        if editor {
+            let deadline = Date().addingTimeInterval(0.5)
+            while filterApplyCount < 1 && Date() < deadline {
+                RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        var fallbackRows = -1
+        if !editor && panelShown {
+            filterInputPanel.setTextForTest("0")
+            fallbackRows = numberOfRows(in: table)
         }
         let rows = numberOfRows(in: table)
         let reloads = filterApplyCount
@@ -1421,7 +1438,27 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             alignFilterFields()
         }
         clearAllFilters()
-        return "editor=\(editor ? 1 : 0) panel=\(panelShown ? 1 : 0) text=\(text) survived=\(survived ? 1 : 0) immediate=\(immediate) reloads=\(reloads) rows=\(rows) same=\(same ? 1 : 0) writes=\(writes) restored=\(restored ? 1 : 0)" as NSString
+        return "key=\(key ? 1 : 0) editor=\(editor ? 1 : 0) panel=\(panelShown ? 1 : 0) text=\(text) survived=\(survived ? 1 : 0) immediate=\(immediate) reloads=\(reloads) rows=\(rows) fallback-rows=\(fallbackRows) same=\(same ? 1 : 0) writes=\(writes) restored=\(restored ? 1 : 0)" as NSString
+    }
+
+    /// Host test. The reload waits while a filter edit is in progress, then shows the matching row.
+    @objc func exerciseFilterDebounceForTest() -> NSString {
+        guard let field = filterFields.first else { return "fail no-field" }
+        clearAllFilters()
+        filterApplyCount = 0
+        filterEditHold = true
+        field.stringValue = "0"
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        let immediate = filterApplyCount
+        let deadline = Date().addingTimeInterval(0.5)
+        while filterApplyCount < 1 && Date() < deadline {
+            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.02))
+        }
+        let rows = numberOfRows(in: table)
+        let reloads = filterApplyCount
+        filterEditHold = false
+        clearAllFilters()
+        return "immediate=\(immediate) reloads=\(reloads) rows=\(rows)" as NSString
     }
 
     @objc func exerciseFilterSheetForTest() -> NSString {
@@ -1446,6 +1483,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
         let shown = filterInputPanel.isShownForTest
         let sheet = filterInputPanel.isSheetForTest
+        let key = field.window?.isKeyWindow == true
         filterInputPanel.setTextForTest("1")
         let rows = numberOfRows(in: table)
         let text = field.stringValue
@@ -1454,7 +1492,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         filterInputPanel.preferStandalone = false
         clearAllFilters()
         let clearedRows = numberOfRows(in: table)
-        return "panel=\(shown ? 1 : 0) sheet=\(sheet ? 1 : 0) text=\(text) rows=\(rows) cleared=\(clearedRows)" as NSString
+        return "key=\(key ? 1 : 0) panel=\(shown ? 1 : 0) sheet=\(sheet ? 1 : 0) text=\(text) rows=\(rows) cleared=\(clearedRows)" as NSString
     }
 
     private func sendMouseDown(to field: NSTextField) -> Bool {
