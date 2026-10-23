@@ -249,9 +249,15 @@ echo "Spotlight importer executable: $IMPORTER_BYTES bytes"
 
 cp "$ROOT_DIR/preview/extension/Info.plist" "$APPEX_CONTENTS_DIR/Info.plist"
 
-# Sign bundles
+# Sign bundles.
+# The importer executable is an MH_BUNDLE (`clang -bundle`). `--deep` signs that
+# Mach-O as its own bundle and embeds a resource seal. The binary has no
+# resources, so `codesign --verify --strict` then fails with
+# "code has no resources but signature indicates they must be present".
+# Sign only the .mdimporter bundle.
 sanitize_bundle "$MD_BUNDLE_DIR"
-sign_with_retry "$MD_BUNDLE_DIR" -s - -f --deep --timestamp=none
+sign_with_retry "$MD_BUNDLE_DIR" -s - -f --timestamp=none
+codesign --verify --strict --verbose=2 "$MD_BUNDLE_DIR"
 sanitize_bundle "$APP_BUNDLE_DIR"
 sign_with_retry "$APPEX_DIR" -s - -f \
   --timestamp=none \
@@ -261,6 +267,7 @@ sanitize_bundle "$APP_BUNDLE_DIR"
 sign_with_retry "$APP_BUNDLE_DIR" -s - -f \
   --timestamp=none \
   --entitlements "$ROOT_DIR/preview/app/Entitlements.plist"
+codesign --verify --strict --verbose=2 "$APP_BUNDLE_DIR/Contents/Resources/Parquet.mdimporter"
 
 echo "Built: $MD_BUNDLE_DIR"
 echo "Built: $APP_BUNDLE_DIR (contains modern Quick Look extension)"
