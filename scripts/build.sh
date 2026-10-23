@@ -90,7 +90,6 @@ swiftc \
 cp "$ROOT_DIR/preview/app/Info.plist" "$APP_CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/preview/app/AppIcon.icns" "$APP_RESOURCES_DIR/AppIcon.icns"
 cp "$ROOT_DIR/NEWS.md" "$APP_RESOURCES_DIR/NEWS.md"
-cp -R "$MD_BUNDLE_DIR" "$APP_RESOURCES_DIR/Parquet.mdimporter"
 
 # Build extension entry point object (NSExtensionMain)
 clang \
@@ -254,10 +253,14 @@ cp "$ROOT_DIR/preview/extension/Info.plist" "$APPEX_CONTENTS_DIR/Info.plist"
 # Mach-O as its own bundle and embeds a resource seal. The binary has no
 # resources, so `codesign --verify --strict` then fails with
 # "code has no resources but signature indicates they must be present".
-# Sign only the .mdimporter bundle.
+# Sign only the .mdimporter bundle, then copy that signed bundle into the app.
+# Copying earlier keeps the linker's seal on the nested executable.
 sanitize_bundle "$MD_BUNDLE_DIR"
 sign_with_retry "$MD_BUNDLE_DIR" -s - -f --timestamp=none
 codesign --verify --strict --verbose=2 "$MD_BUNDLE_DIR"
+rm -rf "$APP_RESOURCES_DIR/Parquet.mdimporter"
+cp -R "$MD_BUNDLE_DIR" "$APP_RESOURCES_DIR/Parquet.mdimporter"
+codesign --verify --strict --verbose=2 "$APP_RESOURCES_DIR/Parquet.mdimporter"
 sanitize_bundle "$APP_BUNDLE_DIR"
 sign_with_retry "$APPEX_DIR" -s - -f \
   --timestamp=none \
