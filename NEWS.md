@@ -1,5 +1,16 @@
 # News
 
+## 0.5.0-ketszeri.6 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- Stats adds p95 and p99, and marks a string column that is really a number, date, boolean, or UUID. A nearly complete inference is tinted red and says how many values did not parse.
+- Click a stats count, a min or max, the median, or a percentile to see those rows. The same row-count picker applies, and the filters stay when you change it. Clear one chip, or clear all of them.
+- Opening the manager updates an older Spotlight importer and registers it again.
+- The importer signature now passes a strict codesign check.
+
 ## 0.5.0-ketszeri.5 - 2026-10-23
 
 Fork release. Update checks look at this fork's GitHub releases.

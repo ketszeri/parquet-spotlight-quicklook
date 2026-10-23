@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0-ketszeri.6 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Stats shows p95 and p99 next to the median. They use the same linear percentile and the same sample cap as the median, for numeric, temporal, and string-inferred columns.
+- A string column that parses as another type is marked, for example `string → int64 (inferred)`. When the parse rate is at least 95% and below 100%, the marker and the row use a muted red, and the tooltip gives the parse rate and how many values do not parse. Those stats use the parsed values only.
+- In Stats, these cells open the Rows view through one filter: values that do not parse, distinct values, nulls, min, max, median, p95, and p99. Each filter is a chip, such as `price ≥ p95 (123.4)`, and it combines with the search and column filters. The row-count picker caps the list and says `showing X of Y` when it is shorter than the stats count, including when that count is an estimate. Changing the row count keeps the filters. A chip's x clears that filter, and Clear filters clears them all. Distinct values open as a value and count sheet; choosing one filters the rows to that value.
+- Launching the manager replaces an older Spotlight importer in `~/Library/Spotlight` and re-registers it with `mdimport -r`.
+- The importer bundle is signed so `codesign --verify --strict` passes.
+
 ## 0.5.0-ketszeri.5 - 2026-10-23
 
 Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.

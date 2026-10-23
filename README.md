@@ -1,6 +1,6 @@
 # parquet_indexer (Spotlight Importer for `.parquet`)
 
-This is [Csaba Kétszeri's fork](https://github.com/ketszeri/parquet-spotlight-quicklook) (`0.5.0-ketszeri.5`) of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original project is by [rkrug](https://github.com/rkrug). This fork adds Quick Look row preview, a Stats view, and Excel export, and keeps the MIT license. See [LICENSE](LICENSE). The in-app update check looks at this fork's GitHub releases, not upstream.
+This is [Csaba Kétszeri's fork](https://github.com/ketszeri/parquet-spotlight-quicklook) (`0.5.0-ketszeri.6`) of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original project is by [rkrug](https://github.com/rkrug). This fork adds Quick Look row preview, a Stats view, and Excel export, and keeps the MIT license. See [LICENSE](LICENSE). The in-app update check looks at this fork's GitHub releases, not upstream.
 
 > [!WARNING]
 > **This repository was written completely using Codex.**
@@ -21,7 +21,7 @@ This project provides:
   - `Copy Diagnostic Report` action for support/issue reports (anonymized)
   - Quick Look rendering settings (schema display, dataset scan, and row preview)
   - dedicated `Updates` tab for release checks (`Daily`/`Weekly`/`Monthly`)
-  - automatic importer install on app launch if missing
+  - automatic importer install on app launch if missing, and replacement when an older copy is already installed
 
 Since `0.3.0`, naming is standardized to Apple's official **Quick Look** terminology.
 
