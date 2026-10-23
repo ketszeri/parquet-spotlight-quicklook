@@ -150,6 +150,14 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.beginFileExcelExportForTest()
     }
 
+    @objc func exerciseStatsLinksForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseStatsLinksForTest() ?? "no-view"
+    }
+
+    @objc func exerciseUnparsedLinkForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseUnparsedLinkForTest() ?? "no-view"
+    }
+
     @objc func exportBannerForTest() -> NSString {
         (view as? ParquetQuickLookView)?.exportBannerForTest() ?? ""
     }
@@ -211,6 +219,15 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private let filterScroll = NSScrollView()
     private let filterDocument = NSView()
     private var filterFields: [NSTextField] = []
+    private let chipRow = NSStackView()
+    private let clearFiltersButton = NSButton(title: "Clear filters", target: nil, action: nil)
+    private var suppressFilterEdits = false
+    private let distinctSheet = DistinctValueSheet()
+    private var distinctColumn: Int?
+    private var distinctName = ""
+    private var distinctAll: [(String, Int64)] = []
+    private var distinctTotal: Int?
+    private var distinctEstimate = false
     private let tableScroll = NSScrollView()
     private let table = NSTableView()
     private let outlineScroll = NSScrollView()
@@ -301,7 +318,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             kinds = table.columns.map { RowPreviewLogic.kind(forType: $0.typeName) }
             loadedColumns = table.columns.map { (name: $0.name, type: $0.typeName) }
             rows = table.rows.map { cells in
-                cells.map { PreviewCellValue(text: $0.text, title: $0.title, truncated: $0.truncated) }
+                cells.map { PreviewCellValue(text: $0.text, title: $0.title, truncated: $0.truncated, number: $0.number, kinds: $0.kinds) }
             }
             fileRows = table.fileRows
             hiddenColumns = table.hiddenColumns
@@ -437,7 +454,22 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         excelPopup.lastItem?.tag = 2
         excelPopup.target = self
         excelPopup.action = #selector(excelChanged)
-        let toolbar = NSStackView(views: [tabs, labeled("Rows", peekPopup), search, excelPopup])
+        clearFiltersButton.target = self
+        clearFiltersButton.action = #selector(clearAllFilters)
+        clearFiltersButton.bezelStyle = .recessed
+        clearFiltersButton.font = NSFont.systemFont(ofSize: 12)
+        clearFiltersButton.isEnabled = false
+        statsPanel.onActivate = { [weak self] activation in
+            self?.activateStats(activation)
+        }
+        distinctSheet.onPick = { [weak self] value in
+            self?.pickDistinctValue(value)
+        }
+        chipRow.orientation = .horizontal
+        chipRow.spacing = 4
+        chipRow.alignment = .centerY
+        chipRow.isHidden = true
+        let toolbar = NSStackView(views: [tabs, labeled("Rows", peekPopup), search, clearFiltersButton, excelPopup])
         toolbar.orientation = .horizontal
         toolbar.spacing = 8
         toolbar.alignment = .centerY
@@ -454,6 +486,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         chrome.addArrangedSubview(toolbar)
         chrome.addArrangedSubview(banner)
         chrome.addArrangedSubview(note)
+        chrome.addArrangedSubview(chipRow)
         chrome.addArrangedSubview(filterScroll)
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(chrome)
@@ -660,15 +693,143 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         banner.stringValue as NSString
     }
 
+    @objc func exerciseStatsLinksForTest() -> NSString {
+        guard statusReadyForLinks() else { return "fail stats-not-ready" }
+        var report: [String] = []
+        report.append(exerciseNullLink())
+        report.append(exerciseDistinctLink())
+        report.append(exerciseBoundLink(identifier: "min", chip: "id = 0 (min)"))
+        report.append(exerciseBoundLink(identifier: "max", chip: "id = 2 (max)"))
+        report.append(exerciseBoundLink(identifier: "median", chip: "id = 1 (median)"))
+        report.append(exercisePercentileLink(identifier: "p95", chipPrefix: "id ≥ p95"))
+        report.append(exercisePercentileLink(identifier: "p99", chipPrefix: "id ≥ p99"))
+        return report.joined(separator: " | ") as NSString
+    }
+
+    @objc func exerciseUnparsedLinkForTest() -> NSString {
+        guard statusReadyForLinks() else { return "fail stats-not-ready" }
+        guard statsPanel.clickForTest(columnName: "price", identifier: "type") else {
+            return "fail price-marker"
+        }
+        let shown = numberOfRows(in: table)
+        let chip = query.links.map(\.chip).joined(separator: ",")
+        let noteText = note.stringValue
+        let unparsedRows = visible.filter { source in
+            source < rows.count && rows[source].first?.text == "nope"
+        }.count
+        if let fifty = peekPopup.itemArray.first(where: { $0.tag == 50 }) {
+            peekPopup.select(fifty)
+            peekChanged()
+        }
+        let kept = query.links.contains { $0.chip == "price: not int64" }
+        let keptRows = numberOfRows(in: table)
+        clearAllFilters()
+        let cleared = query.links.isEmpty && search.stringValue.isEmpty && query.columnFilters.isEmpty
+        return "chip=\(chip) rows=\(shown) unparsed=\(unparsedRows) kept=\(kept) keptRows=\(keptRows) cleared=\(cleared) tab=\(tabs.selectedSegment) note=\(noteText)" as NSString
+    }
+
+    private func statusReadyForLinks() -> Bool {
+        statsPanel.status == "ready" || statsPanel.status == "partial"
+    }
+
+    private func exerciseNullLink() -> String {
+        clearAllFilters()
+        guard statsPanel.clickForTest(columnName: "label", identifier: "nulls") else { return "fail null-click" }
+        let chip = query.links.first?.chip ?? ""
+        let shown = numberOfRows(in: table)
+        if let field = filterFields.first {
+            field.stringValue = "2"
+            controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        if let fifty = peekPopup.itemArray.first(where: { $0.tag == 50 }) {
+            peekPopup.select(fifty)
+            peekChanged()
+        }
+        let keptChip = query.links.contains { $0.chip == "label: is null" }
+        let keptColumn = query.columnFilters[0] == "2"
+        let afterPeek = numberOfRows(in: table)
+        let noted = note.stringValue.contains("showing 1 of 1 nulls")
+        if let linkChip = chipRow.arrangedSubviews.compactMap({ $0 as? NSButton }).first(where: { $0.title.contains("is null") }) {
+            linkChip.performClick()
+        }
+        let linkCleared = !query.links.contains { $0.kind == .isNull }
+        let columnRemains = query.columnFilters[0] == "2"
+        clearFiltersButton.performClick()
+        let allClear = query.links.isEmpty && query.columnFilters.isEmpty
+        return "null chip=\(chip) rows=\(shown) kept=\(keptChip) column=\(keptColumn) after=\(afterPeek) noted=\(noted) linkCleared=\(linkCleared) columnRemains=\(columnRemains) allClear=\(allClear)"
+    }
+
+    private func exerciseDistinctLink() -> String {
+        clearAllFilters()
+        guard statsPanel.clickForTest(columnName: "label", identifier: "distinct") else { return "fail distinct-click" }
+        let listed = distinctSheet.valuesForTest.map(\.0).joined(separator: ",")
+        let distinctNote = distinctSheet.noteText
+        let distinctChip = distinctName.isEmpty ? "" : RowPreviewLogic.distinctChip(column: distinctName)
+        distinctSheet.pickForTest("alpha")
+        let valueChip = query.links.first?.chip ?? ""
+        let shown = numberOfRows(in: table)
+        if let ten = peekPopup.itemArray.first(where: { $0.tag == 10 }) {
+            peekPopup.select(ten)
+            peekChanged()
+        }
+        let kept = query.links.contains { $0.chip == "label = alpha" }
+        clearAllFilters()
+        return "distinct values=\(listed) note=\(distinctNote) mode=\(distinctChip) value=\(valueChip) rows=\(shown) kept=\(kept)"
+    }
+
+    private func exerciseBoundLink(identifier: String, chip: String) -> String {
+        clearAllFilters()
+        guard statsPanel.clickForTest(columnName: "id", identifier: identifier) else { return "fail \(identifier)-click" }
+        let actual = query.links.first?.chip ?? ""
+        let shown = numberOfRows(in: table)
+        let text = shown == 1 ? (rows[visible[0]][0].text ?? "") : ""
+        let noteHasCount = note.stringValue.contains("showing")
+        return "\(identifier) chip=\(actual) expect=\(chip) rows=\(shown) text=\(text) noted=\(noteHasCount)"
+    }
+
+    private func exercisePercentileLink(identifier: String, chipPrefix: String) -> String {
+        clearAllFilters()
+        guard statsPanel.clickForTest(columnName: "id", identifier: identifier) else { return "fail \(identifier)-click" }
+        let actual = query.links.first?.chip ?? ""
+        let shown = numberOfRows(in: table)
+        if let hundred = peekPopup.itemArray.first(where: { $0.tag == 100 }) {
+            peekPopup.select(hundred)
+            peekChanged()
+        }
+        let kept = query.links.contains { $0.chip.hasPrefix(chipPrefix) }
+        let still = numberOfRows(in: table)
+        clearAllFilters()
+        return "\(identifier) chip=\(actual) rows=\(shown) kept=\(kept) still=\(still)"
+    }
+
     @objc private func peekChanged() {
         let selected = peekPopup.selectedItem?.tag ?? query.peekCount
-        query.peekCount = RowPreviewDefaults.snapRowCount(selected)
-        persistPeekCount(query.peekCount)
-        if query.peekCount > rows.count, let path = filePath {
-            loadRows(path: path, limit: query.peekCount, sourceNote: nil)
+        let next = RowPreviewDefaults.snapRowCount(selected)
+        let global = query.globalFilter
+        let columnFilters = query.columnFilters
+        let links = query.links
+        let sortColumn = query.sortColumn
+        let sortDirection = query.sortDirection
+        query.peekCount = next
+        persistPeekCount(next)
+        if let path = filePath {
+            suppressFilterEdits = true
+            loadRows(path: path, limit: next, sourceNote: nil)
+            query.globalFilter = global
+            query.columnFilters = columnFilters
+            query.links = links
+            query.sortColumn = sortColumn
+            query.sortDirection = sortDirection
+            query.peekCount = next
+            search.stringValue = global
+            for field in filterFields {
+                field.stringValue = columnFilters[field.tag] ?? ""
+            }
+            suppressFilterEdits = false
             if !showingRows {
                 show(rows: false)
             }
+            refreshDistinctList()
         }
         reloadVisible()
     }
@@ -696,14 +857,21 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private func reloadVisible() {
         visible = RowPreviewLogic.visibleIndexes(rows: rows, kinds: kinds, query: query)
         let matched = RowPreviewLogic.matchCount(rows: rows, query: query)
-        note.stringValue = RowPreviewLogic.summary(
+        var summary = RowPreviewLogic.summary(
             shown: visible.count,
             fileRows: fileRows,
             loaded: rows.count,
             matched: matched,
-            filterActive: RowPreviewLogic.filterIsActive(query),
+            filterActive: RowPreviewLogic.filterIsActive(query) || distinctColumn != nil,
             hiddenColumns: hiddenColumns
         )
+        let prefix = Int64(rows.count) < fileRows
+        let linkNotes = query.links.map { RowPreviewLogic.statsLinkNote(shown: visible.count, link: $0, rowListIsPrefix: prefix) }
+        if !linkNotes.isEmpty {
+            summary += " " + linkNotes.joined(separator: " ")
+        }
+        note.stringValue = summary
+        refreshChips()
         table.reloadData()
         widenTable()
         layoutFilterFields()
@@ -1063,6 +1231,169 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         walk(schemaRoots, depth: 0)
     }
 
+    private func activateStats(_ activation: StatsActivation) {
+        switch activation {
+        case .link(let link):
+            closeDistinctSheet()
+        if let index = query.links.firstIndex(where: { sameLinkTarget($0, link) }) {
+            query.links[index] = link
+        } else {
+            query.links.append(link)
+        }
+            showTab(rowsSegment)
+            reloadVisible()
+        case .distinct(let column, let name, let values, let total, let capped, let estimate):
+            presentDistinct(column: column, name: name, values: values, total: total, capped: capped || estimate, estimate: estimate)
+        }
+    }
+
+    private func sameLinkTarget(_ lhs: StatsLink, _ rhs: StatsLink) -> Bool {
+        guard lhs.column == rhs.column else { return false }
+        switch (lhs.kind, rhs.kind) {
+        case (.unparsed, .unparsed), (.isNull, .isNull), (.nearestNumbers, .nearestNumbers):
+            return true
+        case (.equalsNumber(_, let leftRole), .equalsNumber(_, let rightRole)):
+            return leftRole == rightRole
+        case (.atLeast(let leftName, _), .atLeast(let rightName, _)):
+            return leftName == rightName
+        case (.equalsText(let left), .equalsText(let right)):
+            return left == right
+        default:
+            return false
+        }
+    }
+
+    private func presentDistinct(column: Int, name: String, values: [(String, Int64)], total: Int?, capped: Bool, estimate: Bool) {
+        distinctColumn = column
+        distinctName = name
+        distinctAll = values
+        distinctTotal = total
+        distinctEstimate = estimate || capped
+        showTab(rowsSegment)
+        refreshDistinctList()
+        refreshChips()
+        guard let host = window else { return }
+        distinctSheet.show(on: host)
+    }
+
+    private func refreshDistinctList() {
+        guard distinctColumn != nil else { return }
+        let shown = RowPreviewLogic.rankedDistinct(distinctAll, limit: query.peekCount)
+        let link = StatsLink(
+            column: distinctColumn ?? 0,
+            columnName: distinctName,
+            kind: .equalsText(""),
+            chip: RowPreviewLogic.distinctChip(column: distinctName),
+            total: distinctTotal,
+            totalIsEstimate: distinctEstimate,
+            noun: "distinct"
+        )
+        let prefix = Int64(rows.count) < fileRows
+        distinctSheet.update(values: shown.map { ($0.value, $0.count) }, noteText: RowPreviewLogic.statsLinkNote(shown: shown.count, link: link, rowListIsPrefix: prefix))
+    }
+
+    private func pickDistinctValue(_ value: String) {
+        let column = distinctColumn ?? 0
+        let name = distinctName
+        closeDistinctSheet()
+        let link = StatsLink(
+            column: column,
+            columnName: name,
+            kind: .equalsText(value),
+            chip: RowPreviewLogic.valueChip(column: name, value: value),
+            total: nil,
+            totalIsEstimate: Int64(rows.count) < fileRows,
+            noun: "rows"
+        )
+        query.links.removeAll { $0.column == column && $0.chip == RowPreviewLogic.distinctChip(column: name) }
+        if let index = query.links.firstIndex(where: { $0.column == column && $0.kind == .equalsText(value) }) {
+            query.links[index] = link
+        } else {
+            query.links.append(link)
+        }
+        showTab(rowsSegment)
+        reloadVisible()
+    }
+
+    private func closeDistinctSheet() {
+        distinctColumn = nil
+        distinctName = ""
+        distinctAll = []
+        distinctTotal = nil
+        distinctEstimate = false
+        distinctSheet.close()
+    }
+
+    @objc private func clearChip(_ sender: NSButton) {
+        let tag = sender.tag
+        if tag == 0 {
+            query.globalFilter = ""
+            search.stringValue = ""
+        } else if tag >= 1_000, tag < 2_000 {
+            let index = tag - 1_000
+            query.columnFilters.removeValue(forKey: index)
+            suppressFilterEdits = true
+            filterFields.first { $0.tag == index }?.stringValue = ""
+            suppressFilterEdits = false
+        } else if tag >= 2_000, tag < 3_000 {
+            let index = tag - 2_000
+            if query.links.indices.contains(index) {
+                query.links.remove(at: index)
+            }
+        } else if tag == 3_000 {
+            closeDistinctSheet()
+        }
+        reloadVisible()
+    }
+
+    @objc private func clearAllFilters() {
+        query.globalFilter = ""
+        query.columnFilters = [:]
+        query.links = []
+        suppressFilterEdits = true
+        search.stringValue = ""
+        for field in filterFields {
+            field.stringValue = ""
+        }
+        suppressFilterEdits = false
+        closeDistinctSheet()
+        reloadVisible()
+    }
+
+    private func refreshChips() {
+        for view in chipRow.arrangedSubviews {
+            chipRow.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        var titles: [(String, Int)] = []
+        let global = query.globalFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !global.isEmpty {
+            titles.append(("search: \(global)", 0))
+        }
+        for key in query.columnFilters.keys.sorted() {
+            let text = query.columnFilters[key] ?? ""
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+            let name = key >= 0 && key < loadedColumns.count ? loadedColumns[key].name : "column"
+            titles.append(("\(name): \(text)", 1_000 + key))
+        }
+        for (index, link) in query.links.enumerated() {
+            titles.append((link.chip, 2_000 + index))
+        }
+        if distinctColumn != nil {
+            titles.append((RowPreviewLogic.distinctChip(column: distinctName), 3_000))
+        }
+        for (title, tag) in titles {
+            let button = NSButton(title: "\(title)  ×", target: self, action: #selector(clearChip(_:)))
+            button.tag = tag
+            button.bezelStyle = .recessed
+            button.font = NSFont.systemFont(ofSize: 11)
+            button.setButtonType(.momentaryPushIn)
+            chipRow.addArrangedSubview(button)
+        }
+        chipRow.isHidden = titles.isEmpty
+        clearFiltersButton.isEnabled = !titles.isEmpty
+    }
+
     func numberOfRows(in tableView: NSTableView) -> Int {
         visible.count
     }
@@ -1172,6 +1503,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
 extension ParquetQuickLookView: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
+        guard !suppressFilterEdits else { return }
         guard let field = obj.object as? NSTextField else {
             query.globalFilter = search.stringValue
             reloadVisible()
@@ -1188,5 +1520,103 @@ extension ParquetQuickLookView: NSTextFieldDelegate {
             }
         }
         reloadVisible()
+    }
+}
+
+final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    let panel = NSPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+        styleMask: [.titled, .closable, .resizable],
+        backing: .buffered,
+        defer: false
+    )
+    private let table = NSTableView()
+    private let note = NSTextField(wrappingLabelWithString: "")
+    private var values: [(String, Int64)] = []
+    var onPick: ((String) -> Void)?
+
+    override init() {
+        super.init()
+        panel.title = "Distinct values"
+        let valueColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("value"))
+        valueColumn.title = "Value"
+        valueColumn.width = 240
+        let countColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("count"))
+        countColumn.title = "Count"
+        countColumn.width = 80
+        table.addTableColumn(valueColumn)
+        table.addTableColumn(countColumn)
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.action = #selector(clicked)
+        table.doubleAction = #selector(clicked)
+        table.headerView = NSTableHeaderView()
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        note.font = NSFont.systemFont(ofSize: 12)
+        note.maximumNumberOfLines = 3
+        let content = NSStackView(views: [note, scroll])
+        content.orientation = .vertical
+        content.spacing = 6
+        content.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView = NSView()
+        panel.contentView?.addSubview(content)
+        if let host = panel.contentView {
+            NSLayoutConstraint.activate([
+                content.topAnchor.constraint(equalTo: host.topAnchor),
+                content.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                content.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                content.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+            ])
+        }
+    }
+
+    var noteText: String { note.stringValue }
+    var valuesForTest: [(String, Int64)] { values }
+
+    func update(values: [(String, Int64)], noteText: String) {
+        self.values = values
+        note.stringValue = noteText
+        table.reloadData()
+    }
+
+    func show(on window: NSWindow) {
+        if panel.sheetParent != nil {
+            return
+        }
+        window.beginSheet(panel)
+    }
+
+    func close() {
+        if let parent = panel.sheetParent {
+            parent.endSheet(panel)
+        } else {
+            panel.orderOut(nil)
+        }
+    }
+
+    func pickForTest(_ value: String) {
+        onPick?(value)
+    }
+
+    @objc private func clicked() {
+        let row = table.clickedRow
+        guard row >= 0, row < values.count else { return }
+        onPick?(values[row].0)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        values.count
+    }
+
+    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+        guard row >= 0, row < values.count else { return nil }
+        if tableColumn?.identifier.rawValue == "count" {
+            return "\(values[row].1)"
+        }
+        return values[row].0
     }
 }

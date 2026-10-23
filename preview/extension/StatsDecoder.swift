@@ -24,12 +24,38 @@ struct StatsColumn {
     var stddev: String?
     var p25: String?
     var p75: String?
+    var p95: String?
+    var p99: String?
+    var minNumber: Double?
+    var maxNumber: Double?
+    var medianNumber: Double?
+    var medianLow: Double?
+    var medianHigh: Double?
+    var medianLowText: String?
+    var medianHighText: String?
+    var p95Number: Double?
+    var p99Number: Double?
+    var minCount: Int64?
+    var maxCount: Int64?
+    var medianCount: Int64?
+    var p95Count: Int64?
+    var p99Count: Int64?
     var percentilesExact: Bool
     var temporal: Bool
     var top: [StatsTopValue]
+    var values: [StatsTopValue]
+    var valuesCapped: Bool
+
+    var marker: ColumnStatsFormat.InferredMarker? {
+        ColumnStatsFormat.inferredMarker(storage: storageType, detected: detected, parsedPercent: parsedPercent, unparsed: unparsed)
+    }
 
     var typeLabel: String {
-        ColumnStatsFormat.typeLabel(storage: storageType, detected: detected, parsedPercent: parsedPercent)
+        marker?.label ?? storageType
+    }
+
+    var isPartial: Bool {
+        marker?.partial == true
     }
 }
 
@@ -94,6 +120,12 @@ enum StatsDecoder {
                 top.append(StatsTopValue(value: item["value"] as? String ?? "", count: int64(item["count"])))
             }
         }
+        var values: [StatsTopValue] = []
+        if let rawValues = raw["values"] as? [[String: Any]] {
+            for item in rawValues {
+                values.append(StatsTopValue(value: item["value"] as? String ?? "", count: int64(item["count"])))
+            }
+        }
         return StatsColumn(
             name: raw["name"] as? String ?? "",
             storageType: raw["storage_type"] as? String ?? "",
@@ -113,14 +145,36 @@ enum StatsDecoder {
             stddev: raw["stddev"] as? String,
             p25: raw["p25"] as? String,
             p75: raw["p75"] as? String,
+            p95: raw["p95"] as? String,
+            p99: raw["p99"] as? String,
+            minNumber: double(raw["min_number"]),
+            maxNumber: double(raw["max_number"]),
+            medianNumber: double(raw["median_number"]),
+            medianLow: double(raw["median_low"]),
+            medianHigh: double(raw["median_high"]),
+            medianLowText: raw["median_low_text"] as? String,
+            medianHighText: raw["median_high_text"] as? String,
+            p95Number: double(raw["p95_number"]),
+            p99Number: double(raw["p99_number"]),
+            minCount: optionalInt64(raw["min_count"]),
+            maxCount: optionalInt64(raw["max_count"]),
+            medianCount: optionalInt64(raw["median_count"]),
+            p95Count: optionalInt64(raw["p95_count"]),
+            p99Count: optionalInt64(raw["p99_count"]),
             percentilesExact: bool(raw["percentiles_exact"]),
             temporal: bool(raw["temporal"]),
-            top: top
+            top: top,
+            values: values,
+            valuesCapped: bool(raw["values_capped"])
         )
     }
 
     private static func int64(_ value: Any?) -> Int64 {
         (value as? NSNumber)?.int64Value ?? 0
+    }
+
+    private static func optionalInt64(_ value: Any?) -> Int64? {
+        (value as? NSNumber)?.int64Value
     }
 
     private static func uint64(_ value: Any?) -> UInt64 {

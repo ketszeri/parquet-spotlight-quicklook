@@ -135,6 +135,11 @@ echo "==> Host the view controller for a real fixture"
 PARQUET_PROBE_APPEX="$APPEX" \
   "$HOST" "$BUNDLE_DIR" "$FIXTURE" rows
 
+INFERRED="$ROOT_DIR/fixtures/parquet/inferred.parquet"
+[[ -f "$INFERRED" ]] || fail "missing fixture $INFERRED"
+echo "==> Host the unparsed stats link"
+"$HOST" "$BUNDLE_DIR" "$INFERRED" rows marker
+
 mkdir -p "$SETTINGS_DIR"
 cat > "$SETTINGS_DIR/settings.json" <<'EOF'
 {

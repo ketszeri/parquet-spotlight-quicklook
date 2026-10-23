@@ -94,9 +94,18 @@ func runRowPreviewLogicTests() {
 
     assertEqual(
         ColumnStatsFormat.typeLabel(storage: "string", detected: "int", parsedPercent: 98.7),
-        "string → int (98.7% parsed)",
-        "stringly typed columns name the detected type and the parse rate"
+        "string → int64 (inferred)",
+        "an inferred string column names the detected type"
     )
+    let partial = ColumnStatsFormat.inferredMarker(storage: "string", detected: "int", parsedPercent: 98.7, unparsed: 13)
+    assertTrue(partial?.partial == true, "a high parse rate below 100% is a partial inference")
+    assertTrue(partial?.tooltip.contains("98.7% parse as int64") == true, "the tooltip includes the parse rate")
+    assertTrue(partial?.tooltip.contains("13 values don't") == true, "the tooltip includes the unparsed count")
+    assertTrue(partial?.tooltip.contains("Show values that don't parse") == true, "the partial marker offers the unparsed rows")
+    let complete = ColumnStatsFormat.inferredMarker(storage: "string", detected: "decimal", parsedPercent: 100, unparsed: 0)
+    assertEqual(complete?.label ?? "", "string → double (inferred)", "a complete inference keeps the normal marker")
+    assertTrue(complete?.partial == false, "100% parsed is not tinted")
+    assertTrue(ColumnStatsFormat.inferredMarker(storage: "string", detected: "int", parsedPercent: 90, unparsed: 10) == nil, "below the 95% threshold is not an inference")
     assertEqual(ColumnStatsFormat.typeLabel(storage: "int64", detected: nil, parsedPercent: nil), "int64", "native columns keep their storage type")
     assertEqual(ColumnStatsFormat.nullLabel(nulls: 12, percent: 4.5), "12 (4.5%)", "nulls include a percent")
     assertEqual(ColumnStatsFormat.distinctLabel(distinct: 10, exact: true), "10", "exact distinct counts stay plain")
@@ -138,4 +147,47 @@ func runRowPreviewLogicTests() {
     assertEqual(viewRows?.first?.first as? String ?? "", "=1+1", "the exported cell keeps the displayed text")
     let lastRow = viewRows?.last ?? []
     assertTrue(lastRow.contains { $0 is NSNull }, "a null cell stays null in the export")
+
+    let parsedRows: [[PreviewCellValue]] = [
+        [PreviewCellValue(text: "1", title: nil, truncated: false, number: 1, kinds: ["int", "decimal"])],
+        [PreviewCellValue(text: "nope", title: nil, truncated: false, number: nil, kinds: [])],
+        [PreviewCellValue(text: nil, title: nil, truncated: false, number: nil, kinds: [])],
+        [PreviewCellValue(text: "9", title: nil, truncated: false, number: 9, kinds: ["int", "decimal"])]
+    ]
+    let parsedKinds: [ColumnSortKind] = [.number]
+    var linked = RowPreviewQuery(peekCount: 10, globalFilter: "", columnFilters: [:], sortColumn: nil, sortDirection: .off)
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .unparsed(inferred: "int"), chip: RowPreviewLogic.unparsedChip(column: "price", inferredLabel: "int64"), total: 1, totalIsEstimate: false, noun: "unparsed")]
+    assertEqual(RowPreviewLogic.unparsedChip(column: "price", inferredLabel: "int64"), "price: not int64", "the unparsed chip names the inferred type")
+    let unparsed = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
+    assertEqual(unparsed, ["nope"] as [String?], "the unparsed link keeps values that are not the inferred type")
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .isNull, chip: RowPreviewLogic.nullChip(column: "price"), total: 1, totalIsEstimate: false, noun: "nulls")]
+    assertEqual(RowPreviewLogic.nullChip(column: "price"), "price: is null", "the null chip names the column")
+    let nulls = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
+    assertEqual(nulls, [nil], "the null link keeps null cells")
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .equalsNumber(1, role: "min"), chip: RowPreviewLogic.boundChip(column: "price", displayed: "1", role: "min"), total: 1, totalIsEstimate: false, noun: "rows")]
+    assertEqual(RowPreviewLogic.boundChip(column: "price", displayed: "1", role: "min"), "price = 1 (min)", "min and max chips name the bound")
+    let mins = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
+    assertEqual(mins, ["1"] as [String?], "min compares the parsed number")
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .nearestNumbers(low: 1, high: 9), chip: RowPreviewLogic.betweenChip(column: "price", low: "1", high: "9", median: "5"), total: 2, totalIsEstimate: false, noun: "rows")]
+    assertEqual(RowPreviewLogic.betweenChip(column: "price", low: "1", high: "9", median: "5"), "price = 1 or 9 (median 5)", "a median between two values names both")
+    let nearest = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
+    assertEqual(nearest, ["1", "9"] as [String?], "a between-median link keeps both neighbouring values")
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .atLeast(name: "p95", value: 9), chip: RowPreviewLogic.atLeastChip(column: "price", name: "p95", displayed: "9"), total: 1, totalIsEstimate: false, noun: "rows")]
+    assertEqual(RowPreviewLogic.atLeastChip(column: "price", name: "p95", displayed: "9"), "price ≥ p95 (9)", "p95 and p99 chips name the percentile")
+    let tail = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked).map { parsedRows[$0][0].text }
+    assertEqual(tail, ["9"] as [String?], "p95 keeps parsed values at or above the percentile")
+    linked.globalFilter = "nope"
+    linked.links = [StatsLink(column: 0, columnName: "price", kind: .equalsText("nope"), chip: RowPreviewLogic.valueChip(column: "price", value: "nope"), total: nil, totalIsEstimate: true, noun: "rows")]
+    linked.peekCount = 1
+    let combined = RowPreviewLogic.visibleIndexes(rows: parsedRows, kinds: parsedKinds, query: linked)
+    assertEqual(combined, [1], "a stats link stays combined with the text filter and the row cap")
+    let cappedNote = RowPreviewLogic.statsLinkNote(shown: 1, link: linked.links[0], rowListIsPrefix: true)
+    assertTrue(cappedNote.contains("showing 1 rows"), "a link without a total still says how many rows are showing")
+    assertTrue(cappedNote.contains("Y is an estimate"), "an estimated total says so")
+    assertTrue(cappedNote.contains("first decoded rows"), "a short decode says the row list is a prefix")
+    let exactNote = RowPreviewLogic.statsLinkNote(shown: 1, link: StatsLink(column: 0, columnName: "price", kind: .isNull, chip: "price: is null", total: 4, totalIsEstimate: false, noun: "nulls"), rowListIsPrefix: false)
+    assertEqual(exactNote, "showing 1 of 4 nulls", "a truncated null list names X and Y")
+    let ranked = RowPreviewLogic.rankedDistinct([("b", 1), ("a", 2), ("c", 2)], limit: 2).map(\.value)
+    assertEqual(ranked, ["a", "c"], "distinct values sort by count, then by value, and honour the row cap")
+    assertTrue(RowPreviewLogic.filterIsActive(linked), "a stats link counts as an active filter")
 }

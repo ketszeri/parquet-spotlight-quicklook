@@ -4,6 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow_array::cast::AsArray;
+use arrow_array::types::{
+    Date32Type, Date64Type, Float32Type, Float64Type, Int32Type, Int64Type, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+};
+use arrow_array::Array;
+use arrow_schema::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ProjectionMask;
 use parquet::file::reader::ChunkReader;
@@ -11,6 +18,7 @@ use serde::Serialize;
 
 use crate::budget::Budget;
 use crate::capped::CappedFile;
+use crate::detect::{epoch_seconds, parse_bool, parse_number, parse_temporal, parse_uuid, ParsedNumber};
 use crate::error::PreviewError;
 use crate::format::{self, Cell};
 use crate::limits::Limits;
@@ -30,6 +38,12 @@ pub struct PreviewCell {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Parsed numeric value, or epoch seconds for a date or timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<f64>,
+    /// Detection labels this value parses as: int, decimal, bool, date, timestamp, uuid.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -42,6 +56,8 @@ impl From<Cell> for PreviewCell {
             text: cell.text,
             truncated: cell.truncated,
             title: cell.title,
+            number: None,
+            kinds: Vec::new(),
         }
     }
 }
@@ -272,10 +288,133 @@ fn preview_cell_at(
     if column_index >= batch.num_columns() {
         return null_cell();
     }
+    let array = batch.column(column_index);
     match batch_fields.get(column_index) {
-        Some(field) => format::format_cell(field.as_ref(), batch.column(column_index), row_index).into(),
+        Some(field) => annotated_cell(field.as_ref(), array, row_index),
         None => null_cell(),
     }
+}
+
+fn annotated_cell(field: &arrow_schema::Field, array: &arrow_array::ArrayRef, row: usize) -> PreviewCell {
+    let cell = format::format_cell(field, array, row);
+    let mut preview = PreviewCell::from(cell);
+    if preview.text.is_none() {
+        return preview;
+    }
+    let fallback = preview.title.clone().or_else(|| preview.text.clone());
+    let (number, kinds) = annotate_value(array.as_ref(), row, fallback.as_deref());
+    preview.number = number;
+    preview.kinds = kinds;
+    preview
+}
+
+fn annotate_value(array: &dyn Array, row: usize, fallback: Option<&str>) -> (Option<f64>, Vec<String>) {
+    if let Some(native) = native_annotation(array, row) {
+        return native;
+    }
+    let owned = raw_text(array, row);
+    annotate_text(owned.as_deref().or(fallback))
+}
+
+fn native_annotation(array: &dyn Array, row: usize) -> Option<(Option<f64>, Vec<String>)> {
+    if array.is_null(row) || array.len() <= row {
+        return Some((None, Vec::new()));
+    }
+    let (number, kinds): (f64, &[&str]) = match array.data_type() {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            let value = match array.data_type() {
+                DataType::Int32 => array.as_primitive::<Int32Type>().value(row) as f64,
+                DataType::Int64 => array.as_primitive::<Int64Type>().value(row) as f64,
+                _ => return None,
+            };
+            (value, &["int", "decimal"])
+        }
+        DataType::Float32 => (f64::from(array.as_primitive::<Float32Type>().value(row)), &["decimal"]),
+        DataType::Float64 => (array.as_primitive::<Float64Type>().value(row), &["decimal"]),
+        DataType::Boolean => {
+            let bit = array.as_boolean().value(row);
+            (if bit { 1.0 } else { 0.0 }, &["bool"])
+        }
+        DataType::Date32 => {
+            let days = array.as_primitive::<Date32Type>().value(row);
+            (f64::from(days) * 86_400.0, &["date"])
+        }
+        DataType::Date64 => {
+            let millis = array.as_primitive::<Date64Type>().value(row);
+            (millis as f64 / 1_000.0, &["date"])
+        }
+        DataType::Timestamp(unit, _) => {
+            let ticks = match unit {
+                TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row),
+                TimeUnit::Millisecond => array.as_primitive::<TimestampMillisecondType>().value(row),
+                TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row),
+                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row),
+            };
+            let epoch = match unit {
+                TimeUnit::Second => ticks as f64,
+                TimeUnit::Millisecond => ticks as f64 / 1_000.0,
+                TimeUnit::Microsecond => ticks as f64 / 1_000_000.0,
+                TimeUnit::Nanosecond => ticks as f64 / 1_000_000_000.0,
+            };
+            (epoch, &["timestamp"])
+        }
+        _ => return None,
+    };
+    if !number.is_finite() {
+        return Some((None, Vec::new()));
+    }
+    Some((Some(number), kinds.iter().map(|kind| (*kind).to_string()).collect()))
+}
+
+fn raw_text(array: &dyn Array, row: usize) -> Option<String> {
+    if array.is_null(row) || array.len() <= row {
+        return None;
+    }
+    match array.data_type() {
+        DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
+        DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        _ => None,
+    }
+}
+
+fn annotate_text(text: Option<&str>) -> (Option<f64>, Vec<String>) {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return (None, Vec::new());
+    };
+    let mut number = None;
+    let mut kinds = Vec::new();
+    match parse_number(text) {
+        Some(ParsedNumber::Integer(value)) => {
+            kinds.push("int".to_string());
+            kinds.push("decimal".to_string());
+            number = Some(value as f64);
+        }
+        Some(ParsedNumber::Decimal(value)) if value.is_finite() => {
+            kinds.push("decimal".to_string());
+            number = Some(value);
+        }
+        _ => {}
+    }
+    if let Some(flag) = parse_bool(text) {
+        kinds.push("bool".to_string());
+        if number.is_none() {
+            number = Some(if flag { 1.0 } else { 0.0 });
+        }
+    }
+    if let Some(time) = parse_temporal(text) {
+        if time.has_time {
+            kinds.push("timestamp".to_string());
+        } else {
+            kinds.push("date".to_string());
+        }
+        if number.is_none() {
+            number = Some(epoch_seconds(time));
+        }
+    }
+    if parse_uuid(text) {
+        kinds.push("uuid".to_string());
+    }
+    (number, kinds)
 }
 
 fn null_cell() -> PreviewCell {
@@ -283,6 +422,8 @@ fn null_cell() -> PreviewCell {
         text: None,
         truncated: false,
         title: None,
+        number: None,
+        kinds: Vec::new(),
     }
 }
 

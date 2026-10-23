@@ -27,6 +27,11 @@ fn main() {
         .unwrap_or_else(|| "fixtures/parquet".to_string());
     fs::create_dir_all(&dir).expect("create fixture dir");
     let dir = Path::new(&dir);
+    if env::args().any(|arg| arg == "--only-inferred") {
+        write_inferred(dir);
+        println!("wrote inferred fixture in {}", dir.display());
+        return;
+    }
 
     write_codec(dir, "snappy.parquet", Compression::SNAPPY);
     write_codec(dir, "zstd.parquet", Compression::ZSTD(ZstdLevel::default()));
@@ -39,7 +44,26 @@ fn main() {
     write_many_rows(dir);
     write_row_cap(dir);
     write_malformed(dir);
+    write_inferred(dir);
     println!("wrote fixtures in {}", dir.display());
+}
+
+fn write_inferred(dir: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("price", DataType::Utf8, true)]));
+    let mut values = Vec::new();
+    for _ in 0..4 {
+        values.push(Some("nope".to_string()));
+    }
+    values.push(None);
+    for index in 0..95 {
+        values.push(Some(format!("{index}")));
+    }
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(StringArray::from(values))]).unwrap();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .set_dictionary_enabled(false)
+        .build();
+    write_batch(dir.join("inferred.parquet"), schema, props, &batch);
 }
 
 fn write_codec(dir: &Path, name: &str, compression: Compression) {

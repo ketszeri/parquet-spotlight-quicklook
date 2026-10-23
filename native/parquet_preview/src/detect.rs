@@ -444,6 +444,23 @@ pub fn format_civil(time: CivilTime) -> String {
     }
 }
 
+/// Seconds since the Unix epoch for a parsed civil time. The stats scan and
+/// the row preview use this so a click can compare the same number.
+pub fn epoch_seconds(time: CivilTime) -> f64 {
+    let days = civil_day_number(time.year, time.month, time.day);
+    days as f64 * 86_400.0 + f64::from(time.hour * 3600 + time.minute * 60 + time.second)
+}
+
+fn civil_day_number(year: i32, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u64;
+    (era * 146_097 + doe as i64) - 719_468
+}
+
 /// Sample standard deviation from Welford's M2. Zero when fewer than two values.
 pub fn sample_stddev(count: u64, m2: f64) -> f64 {
     if count < 2 {

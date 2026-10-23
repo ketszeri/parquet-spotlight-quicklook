@@ -1,5 +1,10 @@
 import AppKit
 
+enum StatsActivation {
+    case link(StatsLink)
+    case distinct(column: Int, name: String, values: [(String, Int64)], total: Int?, capped: Bool, estimate: Bool)
+}
+
 /// One row per column. The scan runs off the main thread and can be cancelled
 /// when the preview closes or the user leaves the tab for a different file.
 final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
@@ -8,9 +13,11 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private var loadedPath: String?
     private var generation = UUID()
     private var job: StatsCancelFlag?
+    private var scanPartial = false
     private let note = NSTextField(wrappingLabelWithString: "")
-    private let table = NSTableView()
+    private let table = StatsTableView()
     private let scroll = NSScrollView()
+    var onActivate: ((StatsActivation) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -63,6 +70,7 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
             PreviewLog.error("stats.failed \(message)")
         case .success(let document):
             columns = document.columns
+            scanPartial = document.partial
             status = document.partial ? "partial" : "ready"
             if document.partial {
                 note.stringValue = ColumnStatsFormat.partialNote(scanned: document.scannedRows, fileRows: document.fileRows)
@@ -81,15 +89,17 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         note.textColor = .secondaryLabelColor
         note.maximumNumberOfLines = 3
         let titles = [
-            ("name", "Column", 160),
-            ("type", "Type", 180),
+            ("name", "Column", 140),
+            ("type", "Type", 220),
             ("count", "Count", 70),
             ("nulls", "Nulls", 90),
             ("distinct", "Distinct", 120),
-            ("min", "Min", 120),
-            ("max", "Max", 120),
+            ("min", "Min", 110),
+            ("max", "Max", 110),
             ("mean", "Mean", 90),
-            ("median", "Median", 90),
+            ("median", "Median", 100),
+            ("p95", "P95", 90),
+            ("p99", "P99", 90),
             ("stddev", "Stddev", 90),
             ("p25", "P25", 80),
             ("p75", "P75", 80),
@@ -104,6 +114,11 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         }
         table.dataSource = self
         table.delegate = self
+        table.target = self
+        table.action = #selector(cellClicked)
+        table.handCursor = { [weak self] row, column in
+            self?.isClickable(row: row, column: column) ?? false
+        }
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.headerView = NSTableHeaderView()
@@ -145,11 +160,232 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         case "max": return column.max ?? ""
         case "mean": return column.mean ?? ""
         case "median": return column.median ?? ""
+        case "p95": return column.p95 ?? ""
+        case "p99": return column.p99 ?? ""
         case "stddev": return column.stddev ?? ""
         case "p25": return column.p25 ?? ""
         case "p75": return column.p75 ?? ""
         case "top": return ColumnStatsFormat.topLabel(column.top.map { ($0.value, $0.count) })
         default: return ""
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        let view = StatsTintedRow()
+        view.tinted = row >= 0 && row < columns.count && columns[row].isPartial
+        return view
+    }
+
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard let text = cell as? NSTextFieldCell, row >= 0, row < columns.count else { return }
+        let partialType = tableColumn?.identifier.rawValue == "type" && columns[row].isPartial
+        text.textColor = partialType ? .systemRed : .labelColor
+    }
+
+    func tableView(_ tableView: NSTableView, toolTipFor cell: NSCell, rect: NSRectPointer, tableColumn: NSTableColumn?, row: Int, mouseLocation: NSPoint) -> String {
+        guard row >= 0, row < columns.count, let tableColumn else { return "" }
+        return tooltip(column: columns[row], identifier: tableColumn.identifier.rawValue)
+    }
+
+    @objc private func cellClicked() {
+        let row = table.clickedRow
+        let column = table.clickedColumn
+        guard let activation = activation(row: row, column: column) else { return }
+        onActivate?(activation)
+    }
+
+    func clickForTest(columnName: String, identifier: String) -> Bool {
+        guard let row = columns.firstIndex(where: { $0.name == columnName }) else { return false }
+        guard let column = table.tableColumns.firstIndex(where: { $0.identifier.rawValue == identifier }) else { return false }
+        guard let activation = activation(row: row, column: column) else { return false }
+        onActivate?(activation)
+        return true
+    }
+
+    private func isClickable(row: Int, column: Int) -> Bool {
+        activation(row: row, column: column) != nil
+    }
+
+    private func activation(row: Int, column: Int) -> StatsActivation? {
+        guard row >= 0, column >= 0, row < columns.count, column < table.tableColumns.count else { return nil }
+        return activation(column: columns[row], row: row, identifier: table.tableColumns[column].identifier.rawValue)
+    }
+
+    private func activation(column: StatsColumn, row: Int, identifier: String) -> StatsActivation? {
+        let name = column.name
+        switch identifier {
+        case "type":
+            guard column.isPartial, let detected = column.detected else { return nil }
+            let nice = ColumnStatsFormat.inferredTypeName(detected)
+            return .link(StatsLink(
+                column: row,
+                columnName: name,
+                kind: .unparsed(inferred: detected),
+                chip: RowPreviewLogic.unparsedChip(column: name, inferredLabel: nice),
+                total: Int(max(0, column.unparsed)),
+                totalIsEstimate: scanPartial,
+                noun: "unparsed"
+            ))
+        case "nulls":
+            guard column.nulls > 0 else { return nil }
+            return .link(StatsLink(
+                column: row,
+                columnName: name,
+                kind: .isNull,
+                chip: RowPreviewLogic.nullChip(column: name),
+                total: Int(column.nulls),
+                totalIsEstimate: scanPartial && column.nullsScope != "footer",
+                noun: "nulls"
+            ))
+        case "distinct":
+            guard let distinct = column.distinct, distinct > 0 else { return nil }
+            let capped = column.valuesCapped || !column.distinctExact
+            return .distinct(
+                column: row,
+                name: name,
+                values: column.values.map { ($0.value, $0.count) },
+                total: Int(distinct),
+                capped: capped,
+                estimate: scanPartial || capped
+            )
+        case "min":
+            return boundLink(column: column, row: row, number: column.minNumber, text: column.min, role: "min", count: column.minCount)
+        case "max":
+            return boundLink(column: column, row: row, number: column.maxNumber, text: column.max, role: "max", count: column.maxCount)
+        case "median":
+            return medianLink(column: column, row: row)
+        case "p95":
+            return percentileLink(column: column, row: row, name: "p95", number: column.p95Number, text: column.p95, count: column.p95Count)
+        case "p99":
+            return percentileLink(column: column, row: row, name: "p99", number: column.p99Number, text: column.p99, count: column.p99Count)
+        default:
+            return nil
+        }
+    }
+
+    private func boundLink(column: StatsColumn, row: Int, number: Double?, text: String?, role: String, count: Int64?) -> StatsActivation? {
+        guard let number, let text, !text.isEmpty else { return nil }
+        return .link(StatsLink(
+            column: row,
+            columnName: column.name,
+            kind: .equalsNumber(number, role: role),
+            chip: RowPreviewLogic.boundChip(column: column.name, displayed: text, role: role),
+            total: count.map { Int($0) },
+            totalIsEstimate: scanPartial || count == nil,
+            noun: "rows"
+        ))
+    }
+
+    private func medianLink(column: StatsColumn, row: Int) -> StatsActivation? {
+        guard let median = column.median, let low = column.medianLow, let high = column.medianHigh else { return nil }
+        let lowText = column.medianLowText ?? median
+        let highText = column.medianHighText ?? median
+        let exact = RowPreviewLogic.sameNumber(low, high)
+        let kind: StatsLinkKind = exact ? .equalsNumber(low, role: "median") : .nearestNumbers(low: low, high: high)
+        let chip = exact
+            ? RowPreviewLogic.boundChip(column: column.name, displayed: lowText, role: "median")
+            : RowPreviewLogic.betweenChip(column: column.name, low: lowText, high: highText, median: median)
+        return .link(StatsLink(
+            column: row,
+            columnName: column.name,
+            kind: kind,
+            chip: chip,
+            total: column.medianCount.map { Int($0) },
+            totalIsEstimate: scanPartial || !column.percentilesExact || column.medianCount == nil,
+            noun: "rows"
+        ))
+    }
+
+    private func percentileLink(column: StatsColumn, row: Int, name: String, number: Double?, text: String?, count: Int64?) -> StatsActivation? {
+        guard let number, let text, !text.isEmpty else { return nil }
+        return .link(StatsLink(
+            column: row,
+            columnName: column.name,
+            kind: .atLeast(name: name, value: number),
+            chip: RowPreviewLogic.atLeastChip(column: column.name, name: name, displayed: text),
+            total: count.map { Int($0) },
+            totalIsEstimate: scanPartial || !column.percentilesExact || count == nil,
+            noun: "rows"
+        ))
+    }
+
+    private func tooltip(column: StatsColumn, identifier: String) -> String {
+        switch identifier {
+        case "type":
+            return column.marker?.tooltip ?? column.typeLabel
+        case "nulls" where column.nulls > 0:
+            return "Show null rows"
+        case "distinct" where (column.distinct ?? 0) > 0:
+            return "Show distinct values"
+        case "min" where column.minNumber != nil:
+            return "Show rows at the minimum"
+        case "max" where column.maxNumber != nil:
+            return "Show rows at the maximum"
+        case "median" where column.medianNumber != nil:
+            if let low = column.medianLow, let high = column.medianHigh, !RowPreviewLogic.sameNumber(low, high) {
+                return "Show rows nearest the median on each side"
+            }
+            return "Show rows at the median"
+        case "p95" where column.p95Number != nil:
+            return "Show rows at or above p95"
+        case "p99" where column.p99Number != nil:
+            return "Show rows at or above p99"
+        default:
+            return ""
+        }
+    }
+}
+
+final class StatsTintedRow: NSTableRowView {
+    var tinted = false
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        if tinted {
+            NSColor.systemRed.withAlphaComponent(0.18).setFill()
+            dirtyRect.fill()
+            return
+        }
+        super.drawBackground(in: dirtyRect)
+    }
+}
+
+final class StatsTableView: NSTableView {
+    var handCursor: ((Int, Int) -> Bool)?
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking {
+            removeTrackingArea(tracking)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateCursor(at: event)
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+        super.mouseExited(with: event)
+    }
+
+    private func updateCursor(at event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = self.row(at: point)
+        let column = self.column(at: point)
+        if handCursor?(row, column) == true {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.arrow.set()
         }
     }
 }
@@ -168,5 +404,19 @@ final class StatsCancelFlag {
 
     deinit {
         pointer.deallocate()
+    }
+}
+
+extension StatsActivation: Equatable {
+    static func == (lhs: StatsActivation, rhs: StatsActivation) -> Bool {
+        switch (lhs, rhs) {
+        case (.link(let left), .link(let right)):
+            return left == right
+        case (.distinct(let leftColumn, let leftName, _, let leftTotal, let leftCapped, let leftEstimate),
+              .distinct(let rightColumn, let rightName, _, let rightTotal, let rightCapped, let rightEstimate)):
+            return leftColumn == rightColumn && leftName == rightName && leftTotal == rightTotal && leftCapped == rightCapped && leftEstimate == rightEstimate
+        default:
+            return false
+        }
     }
 }

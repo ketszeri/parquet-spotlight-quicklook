@@ -13,6 +13,8 @@ struct RowPreviewCell {
     var text: String?
     var truncated: Bool
     var title: String?
+    var number: Double?
+    var kinds: [String]
 }
 
 struct RowPreviewTable {
@@ -87,7 +89,7 @@ enum RowPreviewDecoder {
             var parsed: [RowPreviewCell] = []
             for rawCell in cells {
                 guard let cell = rawCell as? [String: Any] else {
-                    parsed.append(RowPreviewCell(text: nil, truncated: false, title: nil))
+                    parsed.append(RowPreviewCell(text: nil, truncated: false, title: nil, number: nil, kinds: []))
                     continue
                 }
                 let text: String?
@@ -98,7 +100,9 @@ enum RowPreviewDecoder {
                 }
                 let truncated = (cell["truncated"] as? Bool) ?? (cell["truncated"] as? NSNumber)?.boolValue ?? false
                 let title = cell["title"] as? String
-                parsed.append(RowPreviewCell(text: text, truncated: truncated, title: title))
+                let number = (cell["number"] as? NSNumber)?.doubleValue
+                let kinds = cell["kinds"] as? [String] ?? []
+                parsed.append(RowPreviewCell(text: text, truncated: truncated, title: title, number: number, kinds: kinds))
             }
             rows.append(parsed)
         }

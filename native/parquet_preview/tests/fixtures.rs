@@ -41,6 +41,9 @@ fn codecs_round_trip_plain_values() {
         assert_eq!(table.file_rows, 3);
         assert_eq!(table.shown_rows, 3);
         assert_eq!(table.cell("id", 0).unwrap().text.as_deref(), Some("0"));
+        assert_eq!(table.cell("id", 0).unwrap().number, Some(0.0));
+        assert!(table.cell("id", 0).unwrap().kinds.iter().any(|kind| kind == "int"));
+        assert!(table.cell("label", 2).unwrap().number.is_none());
         assert_eq!(table.cell("label", 0).unwrap().text.as_deref(), Some("alpha"));
         assert_eq!(table.cell("label", 1).unwrap().text.as_deref(), Some("beta"));
         assert!(table.cell("label", 2).unwrap().text.is_none());
@@ -226,8 +229,16 @@ fn stats_use_footer_and_scanned_values() {
     assert_eq!(id.nulls, 0);
     assert_eq!(id.min.as_deref(), Some("0"));
     assert_eq!(id.max.as_deref(), Some("2"));
+    assert_eq!(id.median.as_deref(), Some("1"));
+    assert_eq!(id.p95.as_deref(), Some("1.9"));
+    assert_eq!(id.p99.as_deref(), Some("1.98"));
+    assert!(id.percentiles_exact);
+    assert_eq!(id.min_number, Some(0.0));
+    assert_eq!(id.max_number, Some(2.0));
+    assert_eq!(id.p95_number.is_some(), true);
     assert_eq!(id.distinct, Some(3));
     assert!(id.distinct_exact);
+    assert_eq!(id.values.len(), 3);
     assert!(id.detected.is_none());
     let label = stats.columns.iter().find(|column| column.name == "label").unwrap();
     assert_eq!(label.nulls, 1);
@@ -248,6 +259,21 @@ fn stats_use_footer_and_scanned_values() {
     assert_eq!(event.min.as_deref(), Some("1970-01-01"));
     assert_eq!(event.max.as_deref(), Some("2020-01-02"));
     assert!(event.temporal);
+}
+
+#[test]
+fn inferred_fixture_marks_partial_integers() {
+    let stats = stats_path(&fixture("inferred.parquet"), StatsLimits::default(), Arc::new(AtomicBool::new(false))).unwrap();
+    let price = &stats.columns[0];
+    assert_eq!(price.name, "price");
+    assert_eq!(price.detected.as_deref(), Some("int"));
+    assert_eq!(price.unparsed, 4);
+    assert!(price.parsed_percent.unwrap() < 100.0);
+    let table = preview("inferred.parquet");
+    assert_eq!(table.cell("price", 0).unwrap().text.as_deref(), Some("nope"));
+    assert!(table.cell("price", 0).unwrap().kinds.is_empty());
+    assert!(table.cell("price", 4).unwrap().text.is_none());
+    assert!(table.cell("price", 5).unwrap().kinds.iter().any(|kind| kind == "int"));
 }
 
 #[test]
@@ -279,6 +305,80 @@ fn stringly_typed_column_is_detected_while_scanning() {
     assert_eq!(column.unparsed, 4);
     assert_eq!(column.min.as_deref(), Some("0"));
     assert_eq!(column.max.as_deref(), Some("95"));
+    assert!(column.p95.is_some());
+    assert!(column.p99.is_some());
+    assert_eq!(column.distinct, Some(96));
+    assert!(column.values.iter().all(|item| item.value != "nope"));
+    assert_eq!(column.median_low, Some(47.0));
+    assert_eq!(column.median_high, Some(48.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bool_and_date_strings_use_parsed_values_only() {
+    let dir = std::env::temp_dir().join(format!("parquet-stats-kinds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("kinds.parquet");
+    let mut flags = Vec::new();
+    let mut days = Vec::new();
+    let mut stamps = Vec::new();
+    let mut uids = Vec::new();
+    for index in 0..19 {
+        flags.push(Some(if index % 2 == 0 { "true".to_string() } else { "false".to_string() }));
+        days.push(Some(format!("2020-01-{:02}", index + 1)));
+        stamps.push(Some(format!("2020-01-{:02}T01:02:03Z", index + 1)));
+        uids.push(Some(format!("00000000-0000-0000-0000-0000000000{:02x}", index + 1)));
+    }
+    flags.push(Some("nope".to_string()));
+    days.push(Some("nope".to_string()));
+    stamps.push(Some("nope".to_string()));
+    uids.push(Some("nope".to_string()));
+    let schema = std::sync::Arc::new(arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("flag", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("day", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("when", arrow_schema::DataType::Utf8, true),
+        arrow_schema::Field::new("uid", arrow_schema::DataType::Utf8, true),
+    ]));
+    let batch = arrow_array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(arrow_array::StringArray::from(flags)),
+            std::sync::Arc::new(arrow_array::StringArray::from(days)),
+            std::sync::Arc::new(arrow_array::StringArray::from(stamps)),
+            std::sync::Arc::new(arrow_array::StringArray::from(uids)),
+        ],
+    )
+    .unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let stats = stats_path(&path, StatsLimits::default(), Arc::new(AtomicBool::new(false))).unwrap();
+    let flag = stats.columns.iter().find(|column| column.name == "flag").unwrap();
+    assert_eq!(flag.detected.as_deref(), Some("bool"));
+    assert_eq!(flag.unparsed, 1);
+    assert_eq!(flag.min_number, Some(0.0));
+    assert_eq!(flag.max_number, Some(1.0));
+    assert!(flag.p95.is_some());
+    assert!(flag.values.iter().all(|item| item.value != "nope"));
+    let day = stats.columns.iter().find(|column| column.name == "day").unwrap();
+    assert_eq!(day.detected.as_deref(), Some("date"));
+    assert_eq!(day.unparsed, 1);
+    assert!(day.temporal);
+    assert_eq!(day.min.as_deref(), Some("2020-01-01"));
+    assert!(day.p99.is_some());
+    assert!(day.values.iter().all(|item| item.value != "nope"));
+    let when = stats.columns.iter().find(|column| column.name == "when").unwrap();
+    assert_eq!(when.detected.as_deref(), Some("timestamp"));
+    assert!(when.temporal);
+    assert!(when.p95.is_some());
+    assert!(when.values.iter().all(|item| item.value != "nope"));
+    let uid = stats.columns.iter().find(|column| column.name == "uid").unwrap();
+    assert_eq!(uid.detected.as_deref(), Some("uuid"));
+    assert_eq!(uid.unparsed, 1);
+    assert!(uid.median.is_none());
+    assert!(uid.values.iter().all(|item| item.value != "nope"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

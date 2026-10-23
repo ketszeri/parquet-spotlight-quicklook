@@ -14,6 +14,7 @@ if arguments.count < 4 {
 let bundleURL = URL(fileURLWithPath: arguments[1])
 let fileURL = URL(fileURLWithPath: arguments[2])
 let expected = arguments[3]
+let mode = arguments.count >= 5 ? arguments[4] : "full"
 
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
@@ -99,7 +100,45 @@ if calls != 1 {
     fputs("handler calls=\(calls) after layout, expected 1\n", stderr)
     exit(1)
 }
-if expected == "rows" {
+if expected == "rows" && mode == "marker" {
+    viewController.perform(NSSelectorFromString("selectStatsTabForTest"))
+    let statsDeadline = Date().addingTimeInterval(12)
+    var statsStatus = ""
+    while Date() < statsDeadline {
+        statsStatus = viewController.value(forKey: "statsPreparationStatus") as? String ?? ""
+        if statsStatus == "ready" || statsStatus == "partial" || statsStatus == "failed" {
+            break
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    fputs("marker stats status=\(statsStatus)\n", stderr)
+    if statsStatus != "ready" && statsStatus != "partial" {
+        fputs("expected stats status ready or partial\n", stderr)
+        exit(1)
+    }
+    guard let report = viewController.perform(NSSelectorFromString("exerciseUnparsedLinkForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("unparsed link exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("unparsed \(report)\n", stderr)
+    if !report.contains("chip=price: not int64") || !report.contains("rows=4") || !report.contains("unparsed=4") {
+        fputs("clicking the inferred marker should show the 4 unparsed rows\n", stderr)
+        exit(1)
+    }
+    if !report.contains("showing 4 of 4 unparsed") {
+        fputs("the unparsed note should match the stats count\n", stderr)
+        exit(1)
+    }
+    if !report.contains("kept=true") || !report.contains("keptRows=4") {
+        fputs("changing the row count should keep the unparsed filter\n", stderr)
+        exit(1)
+    }
+    if !report.contains("cleared=true") || !report.contains("tab=0") {
+        fputs("clearing filters should remove the unparsed chip and leave the rows view\n", stderr)
+        exit(1)
+    }
+} else if expected == "rows" {
     guard let aligned = viewController.perform(NSSelectorFromString("exerciseFilterAlignmentForTest"))?
         .takeUnretainedValue() as? NSNumber, aligned.intValue == 1 else {
         fputs("filter fields do not match column rects after resize and scroll\n", stderr)
@@ -168,6 +207,32 @@ if expected == "rows" {
     fputs("stats status=\(statsStatus)\n", stderr)
     if statsStatus != "ready" && statsStatus != "partial" {
         fputs("expected stats status ready or partial\n", stderr)
+        exit(1)
+    }
+    guard let links = viewController.perform(NSSelectorFromString("exerciseStatsLinksForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("stats link exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("stats links \(links)\n", stderr)
+    let required = [
+        "null chip=label: is null rows=1",
+        "kept=true column=true after=1 noted=true linkCleared=true columnRemains=true allClear=true",
+        "distinct values=alpha,beta",
+        "showing 2 of 2 distinct",
+        "mode=label: distinct",
+        "value=label = alpha",
+        "min chip=id = 0 (min) expect=id = 0 (min) rows=1 text=0",
+        "max chip=id = 2 (max) expect=id = 2 (max) rows=1 text=2",
+        "median chip=id = 1 (median) expect=id = 1 (median) rows=1 text=1",
+        "p95 chip=id ≥ p95",
+        "p99 chip=id ≥ p99",
+        "p95 chip=",
+        "kept=true still=1",
+        "p99 chip="
+    ]
+    for piece in required where !links.contains(piece) {
+        fputs("stats links missing \(piece)\n", stderr)
         exit(1)
     }
     viewController.perform(NSSelectorFromString("exerciseFallbackForTest"))

@@ -16,10 +16,36 @@ struct PreviewCellValue: Equatable {
     var text: String?
     var title: String?
     var truncated: Bool
+    var number: Double? = nil
+    var kinds: [String] = []
 
     static func value(_ text: String?) -> PreviewCellValue {
         PreviewCellValue(text: text, title: nil, truncated: false)
     }
+}
+
+enum StatsLinkKind: Equatable {
+    case unparsed(inferred: String)
+    case isNull
+    case equalsNumber(Double, role: String)
+    case nearestNumbers(low: Double, high: Double)
+    case atLeast(name: String, value: Double)
+    case equalsText(String)
+}
+
+struct StatsLink: Equatable {
+    var column: Int
+    var columnName: String
+    var kind: StatsLinkKind
+    var chip: String
+    var total: Int?
+    var totalIsEstimate: Bool
+    var noun: String
+}
+
+struct DistinctValue: Equatable {
+    var value: String
+    var count: Int64
 }
 
 struct RowPreviewQuery: Equatable {
@@ -28,6 +54,7 @@ struct RowPreviewQuery: Equatable {
     var columnFilters: [Int: String]
     var sortColumn: Int?
     var sortDirection: SortDirection
+    var links: [StatsLink] = []
 }
 
 enum RowPreviewLogic {
@@ -62,7 +89,11 @@ enum RowPreviewLogic {
     }
 
     static func visibleIndexes(rows: [[PreviewCellValue]], kinds: [ColumnSortKind], query: RowPreviewQuery) -> [Int] {
-        let matched = rows.indices.filter { matches(row: rows[$0], global: query.globalFilter, columnFilters: query.columnFilters) }
+        let matched = rows.indices.filter { index in
+            let row = rows[index]
+            return matches(row: row, global: query.globalFilter, columnFilters: query.columnFilters)
+                && linksMatch(row: row, links: query.links)
+        }
         let ordered = order(matched, rows: rows, kinds: kinds, query: query)
         let peek = max(0, query.peekCount)
         if ordered.count <= peek {
@@ -73,15 +104,94 @@ enum RowPreviewLogic {
 
     static func matchCount(rows: [[PreviewCellValue]], query: RowPreviewQuery) -> Int {
         rows.indices.reduce(0) { count, index in
-            count + (matches(row: rows[index], global: query.globalFilter, columnFilters: query.columnFilters) ? 1 : 0)
+            let row = rows[index]
+            let kept = matches(row: row, global: query.globalFilter, columnFilters: query.columnFilters)
+                && linksMatch(row: row, links: query.links)
+            return count + (kept ? 1 : 0)
         }
     }
 
     static func filterIsActive(_ query: RowPreviewQuery) -> Bool {
+        if !query.links.isEmpty {
+            return true
+        }
         if !query.globalFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return true
         }
         return query.columnFilters.values.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    static func unparsedChip(column: String, inferredLabel: String) -> String {
+        "\(column): not \(inferredLabel)"
+    }
+
+    static func nullChip(column: String) -> String {
+        "\(column): is null"
+    }
+
+    static func distinctChip(column: String) -> String {
+        "\(column): distinct"
+    }
+
+    static func valueChip(column: String, value: String) -> String {
+        "\(column) = \(value)"
+    }
+
+    static func boundChip(column: String, displayed: String, role: String) -> String {
+        "\(column) = \(displayed) (\(role))"
+    }
+
+    static func betweenChip(column: String, low: String, high: String, median: String) -> String {
+        "\(column) = \(low) or \(high) (median \(median))"
+    }
+
+    static func atLeastChip(column: String, name: String, displayed: String) -> String {
+        "\(column) ≥ \(name) (\(displayed))"
+    }
+
+    static func statsLinkNote(shown: Int, link: StatsLink, rowListIsPrefix: Bool) -> String {
+        let base: String
+        if let total = link.total {
+            base = "showing \(shown) of \(total) \(link.noun)"
+        } else {
+            base = "showing \(shown) \(link.noun)"
+        }
+        var extras: [String] = []
+        if link.totalIsEstimate {
+            extras.append("Y is an estimate because the stats scan stopped early or the distinct set was capped")
+        }
+        if rowListIsPrefix {
+            extras.append("the row list is the first decoded rows")
+        }
+        if extras.isEmpty {
+            return base
+        }
+        return base + " (" + extras.joined(separator: "; ") + ")"
+    }
+
+    static func rankedDistinct(_ values: [(String, Int64)], limit: Int) -> [DistinctValue] {
+        let sorted = values.sorted { lhs, rhs in
+            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+            return lhs.0 < rhs.0
+        }
+        let cap = max(0, limit)
+        return sorted.prefix(cap).map { DistinctValue(value: $0.0, count: $0.1) }
+    }
+
+    static func sameNumber(_ lhs: Double, _ rhs: Double) -> Bool {
+        if lhs == rhs { return true }
+        guard lhs.isFinite, rhs.isFinite else { return false }
+        let scale = max(abs(lhs), abs(rhs), 1)
+        return abs(lhs - rhs) <= scale * 1e-6
+    }
+
+    static func kindToken(_ detected: String) -> String {
+        switch detected {
+        case "int", "int64": return "int"
+        case "decimal", "double", "float": return "decimal"
+        case "bool", "boolean": return "bool"
+        default: return detected
+        }
     }
 
     static func summary(shown: Int, fileRows: Int64, loaded: Int, matched: Int, filterActive: Bool, hiddenColumns: Int) -> String {
@@ -117,6 +227,35 @@ enum RowPreviewLogic {
             if !(row[index].text ?? "").lowercased().contains(columnNeedle) { return false }
         }
         return true
+    }
+
+    private static func linksMatch(row: [PreviewCellValue], links: [StatsLink]) -> Bool {
+        for link in links {
+            guard link.column >= 0, link.column < row.count else { return false }
+            if !cellMatches(row[link.column], link: link) { return false }
+        }
+        return true
+    }
+
+    private static func cellMatches(_ cell: PreviewCellValue, link: StatsLink) -> Bool {
+        switch link.kind {
+        case .unparsed(let inferred):
+            guard cell.text != nil else { return false }
+            return !cell.kinds.contains(kindToken(inferred))
+        case .isNull:
+            return cell.text == nil
+        case .equalsNumber(let value, _):
+            guard let number = cell.number else { return false }
+            return sameNumber(number, value)
+        case .nearestNumbers(let low, let high):
+            guard let number = cell.number else { return false }
+            return sameNumber(number, low) || sameNumber(number, high)
+        case .atLeast(_, let value):
+            guard let number = cell.number else { return false }
+            return number >= value || sameNumber(number, value)
+        case .equalsText(let text):
+            return cell.text == text
+        }
     }
 
     private static func order(_ indexes: [Int], rows: [[PreviewCellValue]], kinds: [ColumnSortKind], query: RowPreviewQuery) -> [Int] {
