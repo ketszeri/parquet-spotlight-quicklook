@@ -2249,7 +2249,8 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
 
 /// Panel that can become key even when the Quick Look preview window cannot.
 /// Escape and Command-period call `onCancel` so the panel can close without a new filter.
-final class PreviewPanel: NSPanel {
+/// Not final: the filter input window subclasses it so the panel can become key.
+class PreviewPanel: NSPanel {
     var onCancel: (() -> Void)?
 
     override func cancelOperation(_ sender: Any?) {
