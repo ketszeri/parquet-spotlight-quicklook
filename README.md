@@ -1,6 +1,6 @@
 # parquet_indexer (Spotlight Importer for `.parquet`)
 
-This is [Csaba Kétszeri's fork](https://github.com/ketszeri/parquet-spotlight-quicklook) (`0.5.0-ketszeri.7`) of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original project is by [rkrug](https://github.com/rkrug). This fork adds Quick Look row preview, a Stats view, and Excel export, and keeps the MIT license. See [LICENSE](LICENSE). The in-app update check looks at this fork's GitHub releases, not upstream.
+This is [Csaba Kétszeri's fork](https://github.com/ketszeri/parquet-spotlight-quicklook) (`0.5.0-ketszeri.8`) of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original project is by [rkrug](https://github.com/rkrug). This fork adds Quick Look row preview, a Stats view, and Excel export, and keeps the MIT license. See [LICENSE](LICENSE). The in-app update check looks at this fork's GitHub releases, not upstream.
 
 > [!WARNING]
 > **This repository was written completely using Codex.**

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0-ketszeri.8 - 2026-10-24
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Column filters are search fields. If the caret disappears before any text sticks, a filter panel opens. Close, Escape, and Command-period dismiss that panel and the distinct-values sheet without choosing a value.
+- The preview follows the window's appearance, including dark mode, using system text, control, and row colors.
+
 ## 0.5.0-ketszeri.7 - 2026-10-23
 
 Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
