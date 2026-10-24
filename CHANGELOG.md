@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0-ketszeri.8 - 2026-10-24
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Column filters are search fields. If the caret disappears before any text sticks, a filter panel opens. Close, Escape, and Command-period dismiss that panel and the distinct-values sheet without choosing a value.
+- The preview follows the window's appearance, including dark mode, using system text, control, and row colors.
+
+## 0.5.0-ketszeri.7 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- A partial inferred type reads `int64, except 1.3%`, the share that did not parse. The row stays tinted, and the marker still opens those values.
+- Stats runs min, mean, median, max, standard deviation, then P25, P75, P95, and P99. Summary values are not links. The type marker, nulls, distinct count, and each percentile use the link color. A percentile keeps rows whose parsed value is at least that percentile, including numbers and dates stored as strings.
+- The filter boxes under the columns take the keyboard. Typing shows a caret and filters the loaded rows. If Quick Look cannot give the preview the keyboard, the click opens a filter panel instead.
+
+## 0.5.0-ketszeri.6 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Stats shows p95 and p99 next to the median. They use the same linear percentile and the same sample cap as the median, for numeric, temporal, and string-inferred columns.
+- A string column that parses as another type is marked, for example `string → int64 (inferred)`. When the parse rate is at least 95% and below 100%, the marker and the row use a muted red, and the tooltip gives the parse rate and how many values do not parse. Those stats use the parsed values only.
+- In Stats, these cells open the Rows view through one filter: values that do not parse, distinct values, nulls, min, max, median, p95, and p99. Each filter is a chip, such as `price ≥ p95 (123.4)`, and it combines with the search and column filters. The row-count picker caps the list and says `showing X of Y` when it is shorter than the stats count, including when that count is an estimate. Changing the row count keeps the filters. A chip's x clears that filter, and Clear filters clears them all. Distinct values open as a value and count sheet; choosing one filters the rows to that value.
+- Launching the manager replaces an older Spotlight importer in `~/Library/Spotlight` and re-registers it with `mdimport -r`.
+- The importer bundle is signed so `codesign --verify --strict` passes.
+
+## 0.5.0-ketszeri.5 - 2026-10-23
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Pinned the CI actions to full commit SHAs.
+- Row, stats, and Excel export paths are covered by tests, and the long Rust functions are split into helpers with the same results.
+- SonarQube Cloud on this fork imports Rust LCOV and Swift coverage. That wiring stays on the fork.
+
+## 0.5.0-ketszeri.4 - 2026-10-22
+
+Fork of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original author is rkrug. This fork stays MIT licensed. The in-app update check uses `ketszeri/parquet-spotlight-quicklook`.
+
+- Added a Quick Look rows view beside the schema:
+  - first 100 rows by default, or 10, 50, 500, or 1000 from the app and the preview
+  - at most 50 columns, with a note when some are hidden
+  - long values truncated, with the longer text in a tooltip
+  - compact struct, list, and map rendering
+  - nulls shown as `null`
+  - `Showing N of M rows` when the table is shorter than the file
+  - header click sorts ascending, descending, or off (numbers, dates, text; nulls last)
+  - search field and per-column filter on the loaded rows
+  - window size follows the visible screen; the table fills the window
+  - folder datasets preview rows from the first readable file in the scan.
+- **Show row preview** in the host app. Off skips the decoder and shows the schema only. The default is `RowPreviewDefaults.showsRowPreviewByDefault` (set it to `false` to ship schema-only until the user opts in).
+- Row decoding runs only in the sandboxed Quick Look extension (no network entitlement). The Spotlight importer is still footer metadata only.
+- Decoder is Apache Arrow Rust `parquet` 60 (Apache-2.0) behind `native/parquet_preview` and a small C ABI. Codecs: Snappy, ZSTD, GZIP, LZ4, and uncompressed. Dictionary and plain encodings. Logical types include timestamp, decimal, date, string, and UUID.
+- Decode limits: 32 MiB read, 2 s wall time, 1000 rows, 50 columns. Errors and timeouts fall back to the schema view.
+- The rows UI is a native Quick Look view. Data-based HTML does not run the controls, and `WKWebView` would need a network entitlement this extension does not have.
+- CI on `macos-latest` builds the importer, extension, and app, runs the script and decoder tests, and uploads a DMG and zip.
+- The Quick Look view is built in `loadView`, and exceptions stay inside the extension. A failure falls back to a schema view instead of disconnecting Finder. Window size is clamped when no screen is available. Settings use the app-group suite `group.com.rkrug.parquetindexer`, not the extension bundle id.
+- Per-column filter fields use the table's column rects, so they stay aligned when a column is resized, reordered, hidden, or scrolled horizontally.
+- Added a Stats view next to Schema and Rows. It shows count, nulls, distinct, min, max, mean, median, stddev, and quartiles per column, plus top values for text. String columns that parse as integers, decimals, booleans, dates, timestamps, or UUIDs (at least 95% of non-empty values) are summarised as that type. The scan streams the file under its own time and byte budget and says when the result is partial. Parquet footer min/max/null counts are used when they describe the stored values.
+- Added Save as Excel for the whole file or the current rows view. The workbook uses typed cells, a frozen header, and an autofilter. Files past Excel's row limit are split across sheets, and the preview says so before writing. Text that starts with `=`, `+`, `-`, or `@` is prefixed so it is not a formula. The sandboxed extension writes the file into its container and the host app shows the save panel.
+
 ## 0.4.2 - 2026-03-12
 
 - Fixed GitHub Release Assets workflow shell compatibility:

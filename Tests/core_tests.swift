@@ -1,13 +1,13 @@
 import Foundation
 
-private func assertTrue(_ condition: @autoclosure () -> Bool, _ message: String) {
+func assertTrue(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
         fputs("FAIL: \(message)\n", stderr)
         exit(1)
     }
 }
 
-private func assertEqual<T: Equatable>(_ lhs: @autoclosure () -> T, _ rhs: @autoclosure () -> T, _ message: String) {
+func assertEqual<T: Equatable>(_ lhs: @autoclosure () -> T, _ rhs: @autoclosure () -> T, _ message: String) {
     let l = lhs()
     let r = rhs()
     if l != r {
@@ -36,24 +36,25 @@ func runCoreTests() {
     assertTrue(ParquetSemVer(strictTag: "1.2.3") == nil, "strict tag should require v-prefix")
     assertTrue(ParquetSemVer(strictTag: "v1.2.3-beta.1") == nil, "strict tag should reject prerelease")
     assertEqual(ParquetSemVer(looseVersion: "v0.4.0")?.normalized, "0.4.0", "loose version should normalize")
+    assertEqual(ParquetSemVer(looseVersion: "0.5.0-preview.1")?.normalized, "0.5.0", "prerelease should compare as its numeric version")
     assertTrue(ParquetSemVer(looseVersion: "1.10.0")! > ParquetSemVer(looseVersion: "1.2.9")!, "numeric version comparison should be correct")
 
     // Trusted URLs.
     let validator = ParquetUpdateValidator()
     assertTrue(
-        validator.isTrustedReleaseAPIResponseURL(URL(string: "https://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")),
+        validator.isTrustedReleaseAPIResponseURL(URL(string: "https://api.github.com/repos/ketszeri/parquet-spotlight-quicklook/releases/latest")),
         "trusted GitHub API URL should pass"
     )
     assertTrue(
-        !validator.isTrustedReleaseAPIResponseURL(URL(string: "http://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")),
+        !validator.isTrustedReleaseAPIResponseURL(URL(string: "http://api.github.com/repos/ketszeri/parquet-spotlight-quicklook/releases/latest")),
         "http API URL should fail"
     )
     assertTrue(
-        validator.isTrustedReleasePageURL(URL(string: "https://github.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
+        validator.isTrustedReleasePageURL(URL(string: "https://github.com/ketszeri/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
         "trusted release page should pass"
     )
     assertTrue(
-        !validator.isTrustedReleasePageURL(URL(string: "https://example.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
+        !validator.isTrustedReleasePageURL(URL(string: "https://example.com/ketszeri/parquet-spotlight-quicklook/releases/tag/v0.4.0")!, expectedTag: "v0.4.0"),
         "wrong release host should fail"
     )
 
@@ -122,12 +123,21 @@ func runCoreTests() {
     let systemOutsideApplications = FakeSystemAccess(existingPaths: ["/tmp/Parquet Quick Look and Index.app"], commandOutputs: [:])
     let snapshot4 = nonAppsEvaluator.evaluate(using: systemOutsideApplications)
     assertTrue(!snapshot4.appInstalledInApplications, "app outside Applications should not count as installed")
+
+    assertEqual(ImporterVersionLogic.action(installedShort: nil, installedBuild: nil, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .install, "a missing importer is installed")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.2", installedBuild: 8, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .replace, "an older build is replaced")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.2", installedBuild: 14, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .replace, "the ketszeri suffix is compared when the build number matches")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.6", installedBuild: 14, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .keep, "the same importer stays")
+    assertEqual(ImporterVersionLogic.action(installedShort: "0.5.0-ketszeri.9", installedBuild: 20, bundledShort: "0.5.0-ketszeri.6", bundledBuild: 14), .keep, "a newer installed importer is left alone")
+    assertEqual(ImporterVersionLogic.compareShort("0.4.2", "0.5.0-ketszeri.6"), .orderedAscending, "an older release is older even with a suffix on the new one")
 }
 
 @main
 struct CoreTestsMain {
     static func main() {
         runCoreTests()
+        runRowPreviewLogicTests()
+        runExcelSaveTests()
         print("PASS: core logic tests completed")
     }
 }

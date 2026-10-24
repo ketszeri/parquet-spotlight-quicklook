@@ -1,0 +1,31 @@
+[package]
+name = "parquet_preview"
+version = "0.5.0"
+edition = "2021"
+license = "MIT"
+description = "Bounded Parquet row preview for the Quick Look extension"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+arrow-array = "=60.0.0"
+arrow-buffer = "=60.0.0"
+arrow-schema = { version = "=60.0.0", features = ["canonical_extension_types"] }
+bytes = "1"
+parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "arrow_canonical_extension_types", "snap", "flate2-zlib-rs", "lz4", "zstd"] }
+rust_xlsxwriter = { version = "0.101.0", features = ["constant_memory"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+parquet = { version = "=60.0.0", default-features = false, features = ["arrow", "snap", "flate2-zlib-rs", "lz4", "zstd"] }
+zip = "9.0.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
+panic = "unwind"

@@ -2,7 +2,8 @@
 
 ## Human
 
-- **rkrug** (project owner/maintainer)
+- **rkrug** (original author and upstream maintainer)
+- **ketszeri** (Csaba Kétszeri; Quick Look row preview)
 
 ## AI Assistant
 

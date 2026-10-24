@@ -54,8 +54,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "error: tag must look like v0.4.2 (or 0.4.2)" >&2
+if [[ ! "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+  echo "error: tag must look like v0.4.2 or v0.5.0-ketszeri.1" >&2
   exit 2
 fi
 

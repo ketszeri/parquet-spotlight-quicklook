@@ -1,5 +1,7 @@
 # parquet_indexer (Spotlight Importer for `.parquet`)
 
+This is [Csaba Kétszeri's fork](https://github.com/ketszeri/parquet-spotlight-quicklook) (`0.5.0-ketszeri.8`) of [rkrug/parquet-spotlight-quicklook](https://github.com/rkrug/parquet-spotlight-quicklook). The original project is by [rkrug](https://github.com/rkrug). This fork adds Quick Look row preview, a Stats view, and Excel export, and keeps the MIT license. See [LICENSE](LICENSE). The in-app update check looks at this fork's GitHub releases, not upstream.
+
 > [!WARNING]
 > **This repository was written completely using Codex.**
 > **Model:** GPT-5 (Codex coding agent)
@@ -10,26 +12,116 @@ This project provides:
 
 - a macOS Spotlight importer (`.mdimporter`) for Parquet metadata indexing
 - a modern Quick Look preview extension (`.appex`, embedded in a host app) for Parquet metadata preview with:
+  - a **Rows** tab (first N rows, default 100) next to the schema
   - hierarchical schema tree (collapsible groups)
-  - full parsed column list (no preview truncation)
+  - full parsed column list (no preview truncation of the schema)
   - Arrow-style logical scalar type labels where available
 - a small GUI manager app (`Parquet Quick Look and Index.app`) with:
   - `Re-Install`, `Repair Registration`, and `Uninstall` actions
   - `Copy Diagnostic Report` action for support/issue reports (anonymized)
-  - Quick Look rendering settings (schema display + dataset scan controls)
+  - Quick Look rendering settings (schema display, dataset scan, and row preview)
   - dedicated `Updates` tab for release checks (`Daily`/`Weekly`/`Monthly`)
-  - automatic importer install on app launch if missing
+  - automatic importer install on app launch if missing, and replacement when an older copy is already installed
 
 Since `0.3.0`, naming is standardized to Apple's official **Quick Look** terminology.
 
-The importer reads only Parquet footer metadata (`...<metadata_len><PAR1>`), does not parse row contents, and writes Spotlight metadata for search.
+The Spotlight importer reads only Parquet footer metadata (`...<metadata_len><PAR1>`), does not parse row contents, and writes Spotlight metadata for search. Row decoding happens only in the Quick Look extension, and only when **Show row preview** is on. That default is `RowPreviewDefaults.showsRowPreviewByDefault`.
+
+## Row preview
+
+Press Space on a `.parquet` file in Finder. The preview opens on a **Rows** tab with a table of the first rows, and a **Schema** tab with the existing metadata view. A folder dataset previews rows from the first readable file in that scan (lexicographically smallest valid path).
+
+The table:
+
+- truncates long values and keeps the longer text in the cell tooltip
+- renders nested structs, lists, and maps on one line
+- shows nulls as `null`
+- shows at most 50 columns and says how many were hidden
+- fills the preview when the window is resized, and scrolls in both directions with the header kept visible
+- sorts when a column header is clicked (ascending, descending, then off). Numbers and decimals sort numerically, dates and timestamps sort in time order, other values sort as text, and nulls stay last
+- filters from the search field and from a search field under each column. Each column field uses that column's x and width, and follows a resize, reorder, or horizontal scroll. A click places the caret in that field and typing filters the loaded rows (the table refreshes shortly after you pause, and layout does not move a field while its caret is up). If the caret is taken away before any text sticks, or the Quick Look window cannot take the keyboard, the same click opens a filter panel. Close, Escape, and Command-period dismiss that panel and the distinct-values sheet without choosing a value. Filtering and sorting use the rows already loaded
+
+The window size follows the visible frame of the screen Finder is on, minus a margin. A wide table uses that width. A narrow or short table stays compact. Quick Look does not report the destination screen, so the extension uses `NSScreen.main` when that call succeeds. If there is no screen, or the size is not a real display, the window is clamped between 420×280 and 4096×4096.
+
+The manager app's Quick Look settings include **Show row preview** and a row-count popup (`10`, `50`, `100`, `500`, `1000`). The same popup is in the preview. The default is the single constant `RowPreviewDefaults.showsRowPreviewByDefault` in `preview/shared/RowPreviewDefaults.swift`. This fork sets it to `true`. Upstream should set it to `false` so the schema-only preview stays the default until a user opts in. Turn the toggle off and Quick Look shows the schema only; the row decoder is not called.
+
+The extension is sandboxed and has no network entitlement. Row values stay in the Quick Look process. They are not written to the Spotlight index.
+
+The rows UI is an AppKit table inside a view-based `QLPreviewingController`. A data-based HTML reply does not run JavaScript in Finder, and `WKWebView` needs `com.apple.security.network.client` for its web process, which this extension does not request. Sort, filter, and the row popup are native controls. The schema tab is an outline of the same footer metadata. The view is created in `loadView` and is not replaced afterwards. An exception while building the preview is caught, logged, and turned into a schema fallback; if that also fails, Quick Look receives the error. Stages are written with `os_log` subsystem `com.rkrug.parquetindexer`, category `preview`.
+
+The extension reads row-preview settings from `settings.json` in its container and from `UserDefaults(suiteName: "group.com.rkrug.parquetindexer")`. It does not use its own bundle identifier as a defaults suite, and it does not call Core Spotlight. The Spotlight importer remains footer-only.
+
+Decoding uses Apache Arrow's Rust [`parquet`](https://crates.io/crates/parquet) crate (arrow-rs 60, Apache-2.0) through a small C ABI, `libparquet_preview.a`, linked only into the Quick Look extension. See [Decoder choice](#decoder-choice) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Any decode error or timeout leaves the schema view in place and shows a short banner. Finder is not asked to wait past the decoder's 2 second cap. The note `Showing N of M rows` appears when the table is shorter than the file, including when a filter or the row popup hides part of what was loaded.
+
+Privacy: the Spotlight importer never reads row pages. Row bytes are decoded only after the user leaves **Show row preview** on, only inside the Quick Look extension, and only up to the caps below. The extension has no network entitlement, so the preview cannot upload the file.
+
+### Decoder choice
+
+| Candidate | Why it was not linked into the extension |
+| --- | --- |
+| DuckDB | Maintained and convenient, but the embedded library is large and its runtime uses threads and temporary files that are a poor fit for a sandboxed Quick Look process. |
+| Apache Arrow C++ | The reference C++ library. It is maintained and Apache-2.0, and it is also a very large, slow-to-build dependency for a preview of 100 rows. |
+| arrow-rs `parquet` via a C ABI | Chosen. The `parquet` crate is the maintained Arrow implementation, Apache-2.0 (compatible with this MIT project when its LICENSE and NOTICE ship with the app), and it builds as a static library with only the codecs this preview needs. Rust's macOS 12 deployment target is supported. |
+
+The crate is built with default features off. Enabled codecs are Snappy, ZSTD, GZIP (pure Rust `flate2`/`zlib-rs`), and LZ4 (`lz4_flex`, raw). Uncompressed pages and dictionary and plain encodings come from the core reader. There is no `object_store`, async runtime, network stack, or encryption module.
+
+Hard caps, enforced in the Rust library and mirrored by the Swift caller:
+
+- 100 rows by default, chosen from 10, 50, 100, 500, or 1000 (hard maximum 1000)
+- 50 columns maximum
+- 32 MiB of file bytes read
+- 2 seconds of wall time, after which the worker is cancelled
+- 8 MiB uncompressed for one page, 64 MiB uncompressed across the read
+
+A page header that claims a huge uncompressed size is rejected before the official decoder allocates it. Encrypted files and external column paths fail closed. A malformed file falls back to the schema view.
+
+## Stats view
+
+The preview's segmented control is **Rows / Schema / Stats**. Stats is available even when **Show row preview** is off. Choosing it does not change the Spotlight importer, which stays footer-only.
+
+Each column is one row: storage type, count, nulls with a percent, distinct count, then the summary in the order min, mean, median, max, sample standard deviation, then the percentiles from low to high (P25, P75, P95, P99), then the most common values for text. Percentiles use linear interpolation on the scanned values (`p * (n - 1)`). The standard deviation divides by `n - 1`.
+
+The type marker (when some values did not parse), the null count, the distinct count, and each percentile open the Rows view. A percentile keeps rows whose parsed value is at least that percentile, including string columns of numbers or dates. Min, mean, median, max, and standard deviation are not links. Clickable cells use the system link color and a pointing-hand cursor. The row behind a partial inference stays tinted red. The preview follows the window's appearance, including dark mode, using the system text, control, and alternating-row colors.
+
+Parquet footer statistics supply whole-file min, max, and null count when every row group has them and the column is a single leaf. Mean, median, distinct, percentiles, and top values come from a streaming scan. The scan stops at 8 seconds, 256 MiB of bytes read, or 256 columns. If it stops early, the note says the other stats are based on the first N of M rows. Min and max from the footer stay whole-file. The scan runs off the main thread and is cancelled when the preview is released.
+
+### Stringly typed columns
+
+String and binary columns are inspected value by value. Empty and null cells are ignored. A type is chosen when at least 95% of the remaining values parse, using this order when more than one type qualifies: UUID, timestamp, date, decimal, integer, boolean. `0` and `1` stay integers. `true`/`false`/`yes`/`no` become booleans. Decimals accept both `.` and `,` as the decimal separator. A single separator is a decimal point (`1.234` is one and 234 thousandths, `1,50` is one and a half). Thousands separators need at least two groups (`1.234.567`, `1,234.50`, `1.234,50`). Dates accept `YYYY-MM-DD`, `DD.MM.YYYY`, `YYYY.MM.DD` with an optional trailing dot, and `MM/DD/YYYY`. A time (`HH:MM` or `HH:MM:SS`, optional fraction and `Z` or numeric offset, separated by `T` or a space) makes the value a timestamp. UUIDs are the hyphenated 8-4-4-4-12 form. The type line reads `string → int64 (inferred)` when every non-empty value parses, and `int64, except 1.3%` when some do not. Numeric or temporal stats use the parsed values. The unparsed count is the rest.
+
+Temporal min, max, mean, median, and percentiles are shown as dates or timestamps. Their standard deviation is a number of seconds.
+
+## Save as Excel
+
+The preview's **Excel** menu has two commands.
+
+**Entire file…** streams the Parquet file through the same decoder, one batch at a time, and writes `.xlsx` in constant memory (`rust_xlsxwriter` with the `constant_memory` feature). Numbers, booleans, dates, and timestamps are typed cells. Other values are strings. The header row is bold, the header stays frozen, and each sheet has an autofilter. This path does not use the row-preview caps (2 seconds, 32 MiB, 1000 rows). A progress panel counts rows, and Cancel stops the write between rows.
+
+**Rows view…** writes the rows currently on screen: the active sort, filters, row count, and visible columns in their current order. It does not read the file again.
+
+Excel allows 1,048,576 rows and 16,384 columns on a sheet. One row is the header, so each sheet holds 1,048,575 data rows. A longer file is split across sheets named `Rows`, `Rows 2`, and so on. Columns past 16,384 are left out. The preview says so before writing and continues only after you confirm.
+
+A text cell whose trimmed value starts with `=`, `+`, `-`, or `@` is prefixed with `'`, so Excel does not open it as a formula. Typed numbers, booleans, and dates are not prefixed. Integers whose magnitude is above 2^53 are written as text so the spreadsheet does not round them.
+
+The Quick Look extension is sandboxed with `files.user-selected.read-only` and has no network entitlement, so it cannot show a save panel that writes where you choose. `NSSavePanel` inside the Quick Look view service is not relied on. The extension writes the workbook into its own container, at `Library/Application Support/ParquetPreview/Exports/<uuid>.xlsx`, then asks **Parquet Quick Look and Index** to save it. The handoff is all three of these, so one of them can fail without losing the file:
+
+- the URL `parquetquicklook://export?id=<uuid>` opened in the host app
+- the distributed notification `com.rkrug.parquetindexer.exportReady`
+- launching the host app, which on launch looks for a pending export
+
+The host app is not sandboxed. It accepts the id only when it is a UUID, and it only copies a regular file whose path stays inside that Exports directory (the extension container, or the same folder under the real home when the preview is not sandboxed). It then shows `NSSavePanel` and copies the workbook. The app group is not used for this file: an ad-hoc signature on macOS 26 often rejects the group. The workbook is not uploaded.
+
+A column chunk larger than 128 MiB compressed, or a row group whose metadata says it would expand past 512 MiB, is refused before it is decoded. One page that claims more than 8 MiB uncompressed is refused as well.
 
 ## Prerequisites
 
 - **Minimum supported macOS version: 12.0 (Monterey).**
 
 - macOS with Spotlight enabled
-- Xcode Command Line Tools (`xcrun`, `clang`, `codesign`)
+- Xcode Command Line Tools (`xcrun`, `clang`, `codesign`, `swiftc`)
+- Rust via [rustup](https://rustup.rs) (`cargo`, stable toolchain, 1.88 or newer; the `parquet` 60 crate's MSRV)
 - shell access (`zsh`)
 - permission to write to `~/Library/Spotlight` and `~/Applications`
 
@@ -56,9 +148,14 @@ This creates:
 
 The build script also:
 
+- compiles `native/parquet_preview` and links it into `ParquetQuickLook.appex` only
 - copies `Info.plist` and `resources/schema.xml`
+- copies the MIT license and the Apache Arrow LICENSE and NOTICE into the app's `Resources/Licenses`
+- writes `build/size-report.txt` (static library size and linked extension size)
 - clears extended attributes
 - signs the bundle ad-hoc (required for reliable loading)
+
+On Apple Silicon, the script also tries an Intel slice and combines them with `lipo`. If that second build fails, the app is still produced for the host architecture. GitHub Actions `macos-latest` is Apple Silicon, so the CI disk image is arm64 unless the universal link succeeds.
 
 ## Release Packaging
 
@@ -89,7 +186,7 @@ Optional flags:
 
 Download the latest DMG from:
 
-- [GitHub Releases](https://github.com/rkrug/parquet-spotlight-quicklook/releases)
+- [GitHub Releases](https://github.com/ketszeri/parquet-spotlight-quicklook/releases)
 
 Typical asset name:
 
@@ -111,7 +208,7 @@ If a new release causes problems:
 ./scripts/uninstall.sh
 ```
 2. Download an older DMG from:
-   - [GitHub Releases](https://github.com/rkrug/parquet-spotlight-quicklook/releases)
+   - [GitHub Releases](https://github.com/ketszeri/parquet-spotlight-quicklook/releases)
 3. Install that older app and run `Re-Install` (or `Repair Registration`) once.
 
 Optional verification after rollback:
@@ -219,6 +316,10 @@ Optional explicit test file:
 qlmanage -p /path/to/file.parquet
 ```
 
+The window should open on **Rows** with a table, and **Schema** should still show footer metadata. In the manager app, turn off `Show rows in Quick Look`, apply settings, and press Space again: the preview is schema-only. A broken file, or a file that exceeds the time or byte cap, stays on Schema with a short banner.
+
+Sample files used by the decoder tests live in `fixtures/parquet/` (`snappy`, `zstd`, `gzip`, `lz4`, `uncompressed`, dictionary and plain, nested types, a 60-column table, 250 rows, and a malformed trailer).
+
 6. Test dataset folder preview:
 
 ```bash
@@ -246,9 +347,12 @@ This also runs:
 
 ```bash
 ./scripts/test_core.sh
+./scripts/test_rows.sh
 ```
 
-`test_core.sh` validates trusted update URL/tag checks, version comparisons, error mapping, and diagnostics redaction rules.
+`test_core.sh` validates trusted update URL/tag checks, version comparisons, error mapping, and diagnostics redaction rules. `test_rows.sh` runs the Rust decoder tests against `fixtures/parquet/`.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the same build and tests on `macos-latest`, then uploads a DMG and zip named from the app version, plus `size-report.txt`, as the `Parquet-Spotlight-macos` artifact. To install that build: download the artifact, open the disk image, drag `Parquet Quick Look and Index.app` to Applications, open it once, and use `Re-Install`. The app is ad-hoc signed, not notarized. If macOS blocks it, right-click the app and choose `Open`.
 
 ## Search
 
@@ -397,4 +501,6 @@ Keyword tokens written by importer:
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](/Users/rkrug/Documents/GitHub/parquet_indexer/LICENSE).
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+Quick Look row decoding includes the Apache Arrow Rust `parquet` crate, which is Apache-2.0. Its license and notice are in [licenses/](licenses/) and are copied into the app bundle at build time. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

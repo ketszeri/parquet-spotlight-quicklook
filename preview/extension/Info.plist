@@ -17,9 +17,9 @@
   <key>CFBundlePackageType</key>
   <string>XPC!</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.2</string>
+  <string>0.5.0-ketszeri.8</string>
   <key>CFBundleVersion</key>
-  <string>8</string>
+  <string>16</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSExtension</key>
@@ -29,7 +29,7 @@
     <key>NSExtensionAttributes</key>
     <dict>
       <key>QLIsDataBasedPreview</key>
-      <true/>
+      <false/>
       <key>QLSupportedContentTypes</key>
       <array>
         <string>com.rkrug.parquet</string>
@@ -42,7 +42,7 @@
     <key>NSExtensionPointIdentifier</key>
     <string>com.apple.quicklook.preview</string>
     <key>NSExtensionPrincipalClass</key>
-    <string>PreviewProvider</string>
+    <string>ParquetPreviewController</string>
   </dict>
 </dict>
 </plist>

@@ -1,5 +1,59 @@
 # News
 
+## 0.5.0-ketszeri.8 - 2026-10-24
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- Column filters are search fields. If the caret disappears before any text sticks, a filter panel opens. Close, Escape, and Command-period dismiss that panel and the distinct-values sheet without choosing a value.
+- The preview follows the window's appearance, including dark mode.
+
+## 0.5.0-ketszeri.7 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- A partial inferred type says how much did not parse, for example `int64, except 1.3%`.
+- Stats lists min, mean, median, max, and standard deviation, then the percentiles from low to high. Summary values are not links. Percentiles, nulls, distinct, and the type marker are.
+- Typing in a column filter shows a caret and filters the rows. If the preview cannot take the keyboard, a filter panel opens instead.
+
+## 0.5.0-ketszeri.6 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- Stats adds p95 and p99, and marks a string column that is really a number, date, boolean, or UUID. A nearly complete inference is tinted red and says how many values did not parse.
+- Click a stats count, a min or max, the median, or a percentile to see those rows. The same row-count picker applies, and the filters stay when you change it. Clear one chip, or clear all of them.
+- Opening the manager updates an older Spotlight importer and registers it again.
+- The importer signature now passes a strict codesign check.
+
+## 0.5.0-ketszeri.5 - 2026-10-23
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- CI actions are pinned, and the row, stats, and Excel code is covered by tests.
+- The long decode, stats, and export functions are split up. What they return is unchanged.
+
+## 0.5.0-ketszeri.4 - 2026-10-22
+
+Fork release. Update checks look at this fork's GitHub releases.
+
+### Enhancements
+
+- Quick Look can show the first rows of a Parquet file next to the schema. Turn it off with **Show row preview**.
+- Choose 10, 50, 100, 500, or 1000 rows. The window follows the screen, and the table fills that window.
+- Click a column to sort. Filter all columns, or one column, without leaving Quick Look. The per-column fields stay lined up with the columns when you resize, reorder, or scroll.
+- A Stats tab summarises each column, including string columns that are really numbers, dates, or booleans. A partial scan says so.
+- Save the whole file, or the rows you are looking at, as an Excel workbook. The manager app asks where to put it. Large files can span more than one sheet, and values that look like formulas are written as text.
+- A dataset folder previews rows from its first readable Parquet file.
+- If a file cannot be decoded in time, Quick Look stays on the schema and explains why.
+- The Spotlight importer still indexes footer metadata only.
+
 ## 0.4.2 - 2026-03-12
 
 ### Bug Fixes

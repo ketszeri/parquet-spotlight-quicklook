@@ -1,0 +1,7 @@
+# The Quick Look extension targets macOS 12+. These flags apply only when
+# building the Apple targets; Linux test builds ignore them.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-mmacosx-version-min=12.0"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-mmacosx-version-min=12.0"]
