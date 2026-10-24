@@ -119,7 +119,6 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         table.handCursor = { [weak self] row, column in
             self?.isClickable(row: row, column: column) ?? false
         }
-        table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.headerView = NSTableHeaderView()
         table.style = .plain
@@ -128,6 +127,7 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = false
         scroll.borderType = .bezelBorder
+        PreviewAppearance.adapt(scroll: scroll, table: table)
         note.translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         addSubview(note)
@@ -332,19 +332,25 @@ final class StatsPanel: NSView, NSTableViewDataSource, NSTableViewDelegate {
     func typeLabelForTest(columnName: String) -> String {
         columns.first(where: { $0.name == columnName })?.typeLabel ?? ""
     }
+
+    func tintAlphaForTest() -> Double { StatsTintedRow.tintAlpha }
+
+    func linkLuminanceForTest(appearance: NSAppearance) -> Double {
+        Double(PreviewAppearance.luminance(.linkColor, appearance: appearance))
+    }
 }
 
 final class StatsTintedRow: NSTableRowView {
     var tinted = false
 
     override func drawBackground(in dirtyRect: NSRect) {
-        if tinted {
-            NSColor.systemRed.withAlphaComponent(0.18).setFill()
-            dirtyRect.fill()
-            return
-        }
         super.drawBackground(in: dirtyRect)
+        guard tinted else { return }
+        NSColor.systemRed.withAlphaComponent(StatsTintedRow.tintAlpha).setFill()
+        dirtyRect.fill()
     }
+
+    static let tintAlpha = 0.28
 }
 
 final class StatsTableView: NSTableView {

@@ -235,6 +235,26 @@ if expected == "rows" && mode == "marker" {
         fputs("filter panel missing \(piece)\n", stderr)
         exit(1)
     }
+    guard let lost = viewController.perform(NSSelectorFromString("exerciseFilterEditorLossForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter editor-loss exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter editor-loss \(lost)\n", stderr)
+    if !lost.contains("panel=1") {
+        fputs("a column edit that dies immediately should open the filter panel\n", stderr)
+        exit(1)
+    }
+    guard let cancelled = viewController.perform(NSSelectorFromString("exerciseFilterCancelForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("filter cancel exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("filter cancel \(cancelled)\n", stderr)
+    for piece in ["shown=1", "open=0", "rows=3==3", "filtered=0"] where !cancelled.contains(piece) {
+        fputs("filter cancel missing \(piece)\n", stderr)
+        exit(1)
+    }
     guard let excelPlan = viewController.perform(NSSelectorFromString("excelPlanForTest"))?
         .takeUnretainedValue() as? String else {
         fputs("excel plan missing\n", stderr)
@@ -329,6 +349,31 @@ if expected == "rows" && mode == "marker" {
     ]
     for piece in required where !links.contains(piece) {
         fputs("stats links missing \(piece)\n", stderr)
+        exit(1)
+    }
+    guard let dismissed = viewController.perform(NSSelectorFromString("exerciseDistinctDismissForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("distinct dismiss exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("distinct dismiss \(dismissed)\n", stderr)
+    for piece in [
+        "close=Close",
+        "button=opened=1 closed=1 rows=3==3 links=0",
+        "escape=opened=1 closed=1 rows=3==3 links=0",
+        "command=opened=1 closed=1 rows=3==3 links=0"
+    ] where !dismissed.contains(piece) {
+        fputs("distinct dismiss missing \(piece)\n", stderr)
+        exit(1)
+    }
+    guard let dark = viewController.perform(NSSelectorFromString("exerciseDarkAppearanceForTest"))?
+        .takeUnretainedValue() as? String else {
+        fputs("dark appearance exercise did not run\n", stderr)
+        exit(1)
+    }
+    fputs("dark \(dark)\n", stderr)
+    for piece in ["appearance=darkAqua", "light=0", "note=1", "table=1", "link=1", "tint=1", "controls=1"] where !dark.contains(piece) {
+        fputs("dark appearance missing \(piece)\n", stderr)
         exit(1)
     }
     viewController.perform(NSSelectorFromString("exerciseFallbackForTest"))

@@ -146,6 +146,22 @@ final class ParquetPreviewController: NSViewController, QLPreviewingController {
         (view as? ParquetQuickLookView)?.exerciseFilterStandalonePanelForTest() ?? "no-view"
     }
 
+    @objc func exerciseFilterEditorLossForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterEditorLossForTest() ?? "no-view"
+    }
+
+    @objc func exerciseFilterCancelForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseFilterCancelForTest() ?? "no-view"
+    }
+
+    @objc func exerciseDistinctDismissForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseDistinctDismissForTest() ?? "no-view"
+    }
+
+    @objc func exerciseDarkAppearanceForTest() -> NSString {
+        (view as? ParquetQuickLookView)?.exerciseDarkAppearanceForTest() ?? "no-view"
+    }
+
     @objc func selectStatsTabForTest() {
         (view as? ParquetQuickLookView)?.selectStatsTabForTest()
     }
@@ -250,7 +266,12 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     private let note = NSTextField(wrappingLabelWithString: "")
     private let banner = NSTextField(wrappingLabelWithString: "")
     private let filterStrip = FilterStripView()
-    private var filterFields: [PreviewTextField] = []
+    private var filterFields: [PreviewSearchField] = []
+    private var filterEditGeneration: [ObjectIdentifier: Int] = [:]
+    private var filterEditStarted: [ObjectIdentifier: Date] = [:]
+    private var suppressFilterFallback = false
+    /// Host test. Keeps an appearance the test just applied from being replaced.
+    private var pinningAppearance = false
     private let filterInputPanel = FilterInputPanel()
     private weak var filterPanelTarget: NSTextField?
     private var filterPanelBound = false
@@ -398,11 +419,15 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
             tableColumn.minWidth = 88
             tableColumn.resizingMask = .userResizingMask
             table.addTableColumn(tableColumn)
-            let field = PreviewTextField()
+            let field = PreviewSearchField()
             field.placeholderString = column.name
             field.font = NSFont.systemFont(ofSize: 11)
             field.delegate = self
             field.tag = index
+            field.sendsSearchStringImmediately = true
+            field.sendsWholeSearchString = true
+            field.cell?.isScrollable = true
+            PreviewAppearance.adaptSearchField(field)
             field.onRefuseInPlace = { [weak self] source in
                 self?.presentFilterPanel(for: source)
             }
@@ -414,7 +439,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private func buildInterface(showRowControls: Bool) {
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        adoptHostAppearance()
         tabs.segmentCount = 3
         tabs.setLabel("Rows", forSegment: rowsSegment)
         tabs.setLabel("Schema", forSegment: schemaSegment)
@@ -437,6 +462,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         search.sendsSearchStringImmediately = true
         search.sendsWholeSearchString = true
         search.delegate = self
+        PreviewAppearance.adaptSearchField(search)
         search.onRefuseInPlace = { [weak self] source in
             self?.presentFilterPanel(for: source)
         }
@@ -455,12 +481,12 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         tableScroll.documentView = table
         table.dataSource = self
         table.delegate = self
-        table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .noColumnAutoresizing
         table.allowsColumnReordering = true
         table.allowsColumnResizing = true
         table.rowHeight = RowPreviewLayout.rowHeight
         table.style = .plain
+        PreviewAppearance.adapt(scroll: tableScroll, table: table)
         tableScroll.contentView.postsBoundsChangedNotifications = true
         if !geometryObserversInstalled {
             geometryObserversInstalled = true
@@ -485,6 +511,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         outline.headerView = NSTableHeaderView()
         outline.rowHeight = 20
         outlineScroll.documentView = outline
+        PreviewAppearance.adapt(scroll: outlineScroll, table: outline)
         outlineScroll.hasVerticalScroller = true
         outlineScroll.hasHorizontalScroller = true
         outlineScroll.autohidesScrollers = true
@@ -509,6 +536,9 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         }
         distinctSheet.onPick = { [weak self] value in
             self?.pickDistinctValue(value)
+        }
+        distinctSheet.onCancel = { [weak self] in
+            self?.closeDistinctSheet()
         }
         chipRow.orientation = .horizontal
         chipRow.spacing = 4
@@ -581,6 +611,7 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 
     private func labeled(_ title: String, _ control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
+        label.textColor = .labelColor
         let stack = NSStackView(views: [label, control])
         stack.orientation = .horizontal
         stack.spacing = 4
@@ -1474,6 +1505,94 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         return "immediate=\(immediate) reloads=\(reloads) rows=\(rows)" as NSString
     }
 
+    /// Host test. An edit that dies immediately, with the placeholder restored,
+    /// opens the filter panel instead of leaving the empty field.
+    @objc func exerciseFilterEditorLossForTest() -> NSString {
+        guard let field = filterFields.first else { return "fail no-field" }
+        clearAllFilters()
+        suppressFilterFallback = false
+        controlTextDidBeginEditing(Notification(name: NSControl.textDidBeginEditingNotification, object: field))
+        controlTextDidEndEditing(Notification(
+            name: NSControl.textDidEndEditingNotification,
+            object: field,
+            userInfo: ["NSTextMovement": NSNumber(value: NSTextMovement.other.rawValue)]
+        ))
+        let shown = filterInputPanel.isShownForTest
+        let rows = numberOfRows(in: table)
+        filterInputPanel.close()
+        return "panel=\(shown ? 1 : 0) rows=\(rows)" as NSString
+    }
+
+    /// Host test. Closing the filter panel does not add a filter.
+    @objc func exerciseFilterCancelForTest() -> NSString {
+        guard let field = filterFields.first else { return "fail no-field" }
+        clearAllFilters()
+        let before = numberOfRows(in: table)
+        field.forceInputPanel = true
+        defer { field.forceInputPanel = false }
+        guard sendMouseDown(to: field) else { return "fail event" }
+        let shown = filterInputPanel.isShownForTest
+        filterInputPanel.cancelForTest()
+        let open = filterInputPanel.isShownForTest
+        let after = numberOfRows(in: table)
+        let filtered = !query.columnFilters.isEmpty || !query.globalFilter.isEmpty || !query.links.isEmpty
+        return "shown=\(shown ? 1 : 0) open=\(open ? 1 : 0) rows=\(before)==\(after) filtered=\(filtered ? 1 : 0)" as NSString
+    }
+
+    /// Host test. Close, Escape, and Command-period dismiss distinct values
+    /// without choosing one.
+    @objc func exerciseDistinctDismissForTest() -> NSString {
+        guard statusReadyForLinks() else { return "fail stats-not-ready" }
+        clearAllFilters()
+        window?.orderFrontRegardless()
+        let before = numberOfRows(in: table)
+        func openAnd(_ dismiss: () -> Void) -> String {
+            guard statsPanel.clickForTest(columnName: "label", identifier: "distinct") else { return "fail-click" }
+            let opened = distinctSheet.isShownForTest
+            dismiss()
+            let links = query.links.count
+            let rows = numberOfRows(in: table)
+            let closed = !distinctSheet.isShownForTest && distinctName.isEmpty
+            return "opened=\(opened ? 1 : 0) closed=\(closed ? 1 : 0) rows=\(before)==\(rows) links=\(links)"
+        }
+        let button = openAnd { distinctSheet.pressCloseForTest() }
+        let escape = openAnd { distinctSheet.cancelOperationForTest() }
+        let command = openAnd { _ = distinctSheet.cancelFromCommandPeriodForTest() }
+        return "close=\(distinctSheet.closeTitleForTest) button=\(button) escape=\(escape) command=\(command)" as NSString
+    }
+
+    /// Host test. Under darkAqua, fields, tables, and labels are not stuck on light colors.
+    @objc func exerciseDarkAppearanceForTest() -> NSString {
+        let previous = appearance
+        pinningAppearance = true
+        appearance = NSAppearance(named: .darkAqua)
+        displayIfNeeded()
+        let dark = NSAppearance(named: .darkAqua) ?? effectiveAppearance
+        var light = 0
+        if PreviewAppearance.isHardcodedWhite(table.backgroundColor, appearance: dark) { light += 1 }
+        if PreviewAppearance.isHardcodedWhite(tableScroll.backgroundColor, appearance: dark) { light += 1 }
+        if let layerColor = layer?.backgroundColor.flatMap({ NSColor(cgColor: $0) }),
+           PreviewAppearance.isHardcodedWhite(layerColor, appearance: dark) {
+            light += 1
+        }
+        for field in filterFields where field.drawsBackground && PreviewAppearance.isHardcodedWhite(field.backgroundColor, appearance: dark) {
+            light += 1
+        }
+        if search.drawsBackground && PreviewAppearance.isHardcodedWhite(search.backgroundColor, appearance: dark) {
+            light += 1
+        }
+        let noteLum = PreviewAppearance.luminance(note.textColor ?? .secondaryLabelColor, appearance: dark)
+        let tableLum = PreviewAppearance.luminance(table.backgroundColor, appearance: dark)
+        let linkLum = statsPanel.linkLuminanceForTest(appearance: dark)
+        let controlsDark = tabs.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            && peekPopup.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let tint = statsPanel.tintAlphaForTest()
+        pinningAppearance = false
+        appearance = previous
+        adoptHostAppearance()
+        return "appearance=darkAqua light=\(light) note=\(noteLum > 0.45 ? 1 : 0) table=\(tableLum < 0.45 ? 1 : 0) link=\(linkLum > 0.2 ? 1 : 0) tint=\(tint < 0.5 ? 1 : 0) controls=\(controlsDark ? 1 : 0)" as NSString
+    }
+
     @objc func exerciseFilterSheetForTest() -> NSString {
         exerciseFilterPanel(standalone: false)
     }
@@ -1526,9 +1645,31 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         return true
     }
 
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        adoptHostAppearance()
+    }
+
+    /// Follow the Quick Look window. A view left on aqua draws white fields,
+    /// black labels, and light table rows on a dark Finder window.
+    private func adoptHostAppearance() {
+        if pinningAppearance { return }
+        let name = PreviewAppearance.preferredName(window: window)
+        guard appearance?.name != name else { return }
+        appearance = NSAppearance(named: name)
+        PreviewLog.stage("appearance \(name.rawValue)")
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        adoptHostAppearance()
         guard window != nil else { return }
         PreviewLog.stage("view.window")
         if let failure = ParquetCatchException({
@@ -1685,12 +1826,18 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
     }
 
     private func closeDistinctSheet() {
+        let refresh = distinctColumn != nil || distinctSheet.isShownForTest
         distinctColumn = nil
         distinctName = ""
         distinctAll = []
         distinctTotal = nil
         distinctEstimate = false
         distinctSheet.close()
+        // The distinct chip is only a stand-in while the sheet is open.
+        // Closing does not add a value filter.
+        if refresh {
+            reloadVisible()
+        }
     }
 
     @objc private func clearChip(_ sender: NSButton) {
@@ -1720,12 +1867,14 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
         query.columnFilters = [:]
         query.links = []
         suppressFilterEdits = true
+        suppressFilterFallback = true
         // A leftover field editor would make the next assignment look like typing,
         // so the reload would wait and the table would keep the old rows.
         search.abortEditing()
         for field in filterFields {
             field.abortEditing()
         }
+        suppressFilterFallback = false
         search.stringValue = ""
         for field in filterFields {
             field.stringValue = ""
@@ -1879,6 +2028,42 @@ final class ParquetQuickLookView: NSView, NSTableViewDataSource, NSTableViewDele
 }
 
 extension ParquetQuickLookView: NSTextFieldDelegate, NSSearchFieldDelegate {
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let token = ObjectIdentifier(field)
+        let generation = (filterEditGeneration[token] ?? 0) + 1
+        filterEditGeneration[token] = generation
+        filterEditStarted[token] = Date()
+        let responder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        PreviewLog.stage("filter.begin c\(field.tag) key=\(window?.isKeyWindow == true ? 1 : 0) editor=\(field.currentEditor() == nil ? 0 : 1) responder=\(responder)")
+        guard filterFields.contains(where: { $0 === field }) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak field] in
+            guard let self, let field else { return }
+            guard self.filterEditGeneration[token] == generation else { return }
+            guard field.currentEditor() == nil else { return }
+            guard field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            PreviewLog.stage("filter.watchdog editor ended empty c\(field.tag)")
+            self.openFilterPanelAfterFailedEdit(field)
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let token = ObjectIdentifier(field)
+        let started = filterEditStarted.removeValue(forKey: token)
+        filterEditGeneration[token] = (filterEditGeneration[token] ?? 0) + 1
+        let duration = started.map { Date().timeIntervalSince($0) } ?? -1
+        let movement = (obj.userInfo?["NSTextMovement"] as? NSNumber)?.intValue ?? NSTextMovement.other.rawValue
+        PreviewLog.stage("filter.end c\(field.tag) duration=\(String(format: "%.3f", duration)) movement=\(movement) empty=\(field.stringValue.isEmpty ? 1 : 0)")
+        guard !suppressFilterFallback, !suppressFilterEdits, !restoringEditor else { return }
+        guard filterFields.contains(where: { $0 === field }) else { return }
+        guard movement != NSTextMovement.cancel.rawValue else { return }
+        guard duration >= 0, duration < 0.45 else { return }
+        guard field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        PreviewLog.stage("filter.end.fallback c\(field.tag)")
+        openFilterPanelAfterFailedEdit(field)
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         guard !suppressFilterEdits, !restoringEditor else { return }
         guard let field = obj.object as? NSTextField else {
@@ -1889,23 +2074,36 @@ extension ParquetQuickLookView: NSTextFieldDelegate, NSSearchFieldDelegate {
         writeFilter(editorText(field), from: field)
         applyFilterReload(immediate: !fieldIsEditing(field))
     }
+
+    private func openFilterPanelAfterFailedEdit(_ field: NSTextField) {
+        guard !suppressFilterFallback else { return }
+        guard filterFields.contains(where: { $0 === field }) else { return }
+        PreviewLog.stage("filter.fallback panel c\(field.tag)")
+        presentFilterPanel(for: field)
+    }
 }
 
-final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    let panel = NSPanel(
-        contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    let panel = PreviewPanel(
+        contentRect: NSRect(x: 0, y: 0, width: 420, height: 360),
         styleMask: [.titled, .closable, .resizable],
         backing: .buffered,
         defer: false
     )
     private let table = NSTableView()
+    private let scroll = NSScrollView()
     private let note = NSTextField(wrappingLabelWithString: "")
+    private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private var values: [(String, Int64)] = []
+    private var dismissing = false
     var onPick: ((String) -> Void)?
+    var onCancel: (() -> Void)?
 
     override init() {
         super.init()
         panel.title = "Distinct values"
+        panel.delegate = self
+        panel.onCancel = { [weak self] in self?.cancel() }
         let valueColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("value"))
         valueColumn.title = "Value"
         valueColumn.width = 240
@@ -1920,12 +2118,21 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
         table.action = #selector(clicked)
         table.doubleAction = #selector(clicked)
         table.headerView = NSTableHeaderView()
-        let scroll = NSScrollView()
+        table.usesAlternatingRowBackgroundColors = true
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        PreviewAppearance.adapt(scroll: scroll, table: table)
         note.font = NSFont.systemFont(ofSize: 12)
+        note.textColor = .secondaryLabelColor
         note.maximumNumberOfLines = 3
-        let content = NSStackView(views: [note, scroll])
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+        closeButton.bezelStyle = .rounded
+        closeButton.keyEquivalent = "\u{1b}"
+        let buttons = NSStackView(views: [closeButton])
+        buttons.orientation = .horizontal
+        buttons.alignment = .centerY
+        let content = NSStackView(views: [note, scroll, buttons])
         content.orientation = .vertical
         content.spacing = 6
         content.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
@@ -1937,13 +2144,16 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
                 content.topAnchor.constraint(equalTo: host.topAnchor),
                 content.leadingAnchor.constraint(equalTo: host.leadingAnchor),
                 content.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-                content.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+                content.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+                scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160)
             ])
         }
     }
 
     var noteText: String { note.stringValue }
     var valuesForTest: [(String, Int64)] { values }
+    var closeTitleForTest: String { closeButton.title }
+    var isShownForTest: Bool { panel.isVisible || panel.sheetParent != nil }
 
     func update(values: [(String, Int64)], noteText: String) {
         self.values = values
@@ -1952,22 +2162,70 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     func show(on window: NSWindow) {
-        if panel.sheetParent != nil {
+        panel.appearance = NSAppearance(named: PreviewAppearance.preferredName(window: window))
+        if panel.sheetParent != nil || panel.isVisible {
             return
         }
         window.beginSheet(panel)
+        // A preview window that cannot present a sheet still gets a panel
+        // with the same Close, Escape, and Command-period behavior.
+        if panel.sheetParent == nil && !panel.isVisible {
+            panel.center()
+            panel.orderFrontRegardless()
+        }
     }
 
     func close() {
+        if dismissing { return }
+        dismissing = true
         if let parent = panel.sheetParent {
             parent.endSheet(panel)
-        } else {
-            panel.orderOut(nil)
         }
+        panel.orderOut(nil)
+        dismissing = false
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        cancel()
+        return false
+    }
+
+    /// Close without choosing a value. The current row filter stays as it was.
+    func cancel() {
+        guard !dismissing else { return }
+        onCancel?()
     }
 
     func pickForTest(_ value: String) {
         onPick?(value)
+    }
+
+    func pressCloseForTest() {
+        closeButton.performClick(nil)
+    }
+
+    func cancelOperationForTest() {
+        panel.cancelOperation(nil)
+    }
+
+    func cancelFromCommandPeriodForTest() -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: panel.windowNumber,
+            context: nil,
+            characters: ".",
+            charactersIgnoringModifiers: ".",
+            isARepeat: false,
+            keyCode: 47
+        ) else { return false }
+        return panel.performKeyEquivalent(with: event)
+    }
+
+    @objc private func closeClicked() {
+        cancel()
     }
 
     @objc private func clicked() {
@@ -1990,13 +2248,30 @@ final class DistinctValueSheet: NSObject, NSTableViewDataSource, NSTableViewDele
 }
 
 /// Panel that can become key even when the Quick Look preview window cannot.
-final class FilterInputWindow: NSPanel {
+/// Escape and Command-period call `onCancel` so the panel can close without a new filter.
+final class PreviewPanel: NSPanel {
+    var onCancel: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if PreviewAppearance.isCancelKey(event) {
+            onCancel?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+final class FilterInputWindow: PreviewPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
 
 /// Used when a filter field cannot take the keyboard inside the preview.
-final class FilterInputPanel: NSObject, NSTextFieldDelegate {
+final class FilterInputPanel: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     let panel = FilterInputWindow(
         contentRect: NSRect(x: 0, y: 0, width: 360, height: 92),
         styleMask: [.titled, .closable],
@@ -2007,6 +2282,7 @@ final class FilterInputPanel: NSObject, NSTextFieldDelegate {
     var onChange: ((String) -> Void)?
     var preferStandalone = false
     private var updating = false
+    private var dismissing = false
 
     override init() {
         super.init()
@@ -2014,12 +2290,17 @@ final class FilterInputPanel: NSObject, NSTextFieldDelegate {
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
+        panel.delegate = self
+        panel.onCancel = { [weak self] in self?.close() }
         field.font = NSFont.systemFont(ofSize: 13)
         field.delegate = self
+        field.textColor = .labelColor
+        field.backgroundColor = .textBackgroundColor
         field.frame = NSRect(x: 16, y: 48, width: 328, height: 24)
         let close = NSButton(title: "Close", target: self, action: #selector(closeClicked))
         close.frame = NSRect(x: 248, y: 12, width: 96, height: 28)
         close.bezelStyle = .rounded
+        close.keyEquivalent = "\u{1b}"
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 92))
         content.addSubview(field)
         content.addSubview(close)
@@ -2031,6 +2312,7 @@ final class FilterInputPanel: NSObject, NSTextFieldDelegate {
 
     func show(text: String, title: String, on window: NSWindow?) {
         panel.title = title
+        panel.appearance = NSAppearance(named: PreviewAppearance.preferredName(window: window))
         updating = true
         field.stringValue = text
         updating = false
@@ -2059,10 +2341,17 @@ final class FilterInputPanel: NSObject, NSTextFieldDelegate {
     }
 
     func close() {
+        if dismissing { return }
+        dismissing = true
         if let parent = panel.sheetParent {
             parent.endSheet(panel)
         }
         panel.orderOut(nil)
+        dismissing = false
+    }
+
+    func cancelForTest() {
+        panel.cancelOperation(nil)
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2072,5 +2361,10 @@ final class FilterInputPanel: NSObject, NSTextFieldDelegate {
 
     @objc private func closeClicked() {
         close()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        close()
+        return false
     }
 }
