@@ -1,5 +1,11 @@
 # News
 
+## 0.8.0-ketszeri.1 - unreleased (fork pre-release)
+
+### Changes
+
+- Fork build based on Parquet Quick Look and Index 0.8.0-beta.1, with the fork's row-peek features on top of the new Data tab.
+
 ## 0.8.0-beta.1 - 2026-10-30 (pre-release)
 
 ### Changes

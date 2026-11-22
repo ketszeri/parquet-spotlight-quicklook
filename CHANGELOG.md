@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.8.0-ketszeri.1 - unreleased (fork pre-release, ketszeri/parquet-spotlight-quicklook)
+
+- Fork build on top of upstream `0.8.0-beta.1` (`upstream/dev`), merged into the fork's sync branch with the fork-only SonarCloud workflow kept.
+- Bumped importer, app, and extension builds to `18`; `CFBundleShortVersionString` stays `0.8.0` and the app's `ParquetReleaseVersion` is `0.8.0-ketszeri.1`, so the fork does not reuse an upstream version string.
+- Successor to the fork's 0.5.0-ketszeri.x row preview (PR #1): the Quick Look row-peek features are re-implemented on upstream's `ParquetRowReader` and Data tab (see the entries below as they land).
+
 ## 0.8.0-beta.1 - 2026-10-30 (pre-release)
 
 - Bumped importer, app, and extension versions to `0.8.0` (build 17); the app's `ParquetReleaseVersion` is `0.8.0-beta.1`.
