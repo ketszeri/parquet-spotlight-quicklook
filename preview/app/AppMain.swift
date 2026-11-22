@@ -29,6 +29,7 @@ private enum SettingsKeys {
     static let updateCheckInterval = "updateCheckInterval"
     static let lastUpdateCheckAt = "lastUpdateCheckAt"
     static let skippedUpdateVersion = "skippedUpdateVersion"
+    static let updateChannel = "updateChannel"
 }
 
 private enum UpdateCheckInterval: String, CaseIterable {
@@ -99,13 +100,35 @@ private final class AppModel: ObservableObject {
     @Published var recursiveScan = true
     @Published var autoCheckUpdates = true
     @Published var updateCheckInterval: UpdateCheckInterval = .daily
+    // Saved on change: the update check reads it even if settings are never applied.
+    @Published var updateChannel: ParquetUpdateChannel = .stable {
+        didSet {
+            (UserDefaults(suiteName: SettingsKeys.suite) ?? .standard).set(updateChannel.rawValue, forKey: SettingsKeys.updateChannel)
+        }
+    }
     @Published private(set) var recentErrors: [String] = []
     private let appDisplayName = "Parquet Quick Look and Index"
     private let maxRecentErrors = 20
 
-    private struct GitHubLatestRelease: Decodable {
+    private struct GitHubRelease: Decodable {
         let tag_name: String
         let html_url: String
+        let prerelease: Bool?
+        let draft: Bool?
+        let assets: [Asset]?
+
+        struct Asset: Decodable {
+            let name: String
+            let browser_download_url: String
+        }
+    }
+
+    // Signed ZIP + signature for an in-app update, both on this repository's release.
+    private struct UpdatePackage {
+        let tag: String
+        let version: String
+        let zipURL: URL
+        let signatureURL: URL
     }
 
     private let fm = FileManager.default
@@ -130,7 +153,8 @@ private final class AppModel: ObservableObject {
     private let previewCacheDir = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Caches/com.rkrug.parquetindexer.previewhost.preview")
     private let updateValidator = ParquetUpdateValidator()
-    private let releaseCheckURL = URL(string: "https://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases/latest")!
+    // Release list for both channels (`/releases/latest` never returns pre-releases).
+    private let releaseCheckURL = URL(string: "https://api.github.com/repos/rkrug/parquet-spotlight-quicklook/releases?per_page=30")!
 
     init() {
         loadSettings()
@@ -200,6 +224,7 @@ private final class AppModel: ObservableObject {
         } else {
             updateCheckInterval = .daily
         }
+        updateChannel = defaults.string(forKey: SettingsKeys.updateChannel).flatMap(ParquetUpdateChannel.init(rawValue:)) ?? .stable
     }
 
     func saveSettings() {
@@ -270,73 +295,30 @@ private final class AppModel: ObservableObject {
         }
         defaults.set(now, forKey: SettingsKeys.lastUpdateCheckAt)
 
-        var request = URLRequest(url: releaseCheckURL)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("ParquetQuickLookAndIndex", forHTTPHeaderField: "User-Agent")
-
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+        fetchReleases { [weak self] result in
             guard let self else { return }
-
-            if let error {
+            let releases: [GitHubRelease]
+            switch result {
+            case .failure(let error):
                 DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog(ParquetUpdateErrorMapper.describeNetworkError(error))
-                    }
+                    if manual { self.showUpdateErrorDialog(error.message) }
+                }
+                return
+            case .success(let list):
+                releases = list
+            }
+
+            let candidates = Self.candidates(releases)
+            guard
+                let index = ParquetReleaseSelector.newest(candidates, channel: self.updateChannel),
+                let latestVersion = ParquetSemVer(strictTag: releases[index].tag_name)
+            else {
+                DispatchQueue.main.async {
+                    if manual { self.showUpToDateDialog() }
                 }
                 return
             }
-
-            guard let http = response as? HTTPURLResponse else {
-                DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog("Could not check for updates: invalid server response.")
-                    }
-                }
-                return
-            }
-
-            guard self.updateValidator.isTrustedReleaseAPIResponseURL(http.url) else {
-                DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog("Could not check for updates: response origin was not trusted.")
-                    }
-                }
-                return
-            }
-
-            guard (200...299).contains(http.statusCode) else {
-                DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog(ParquetUpdateErrorMapper.describeHTTPError(statusCode: http.statusCode, data: data))
-                    }
-                }
-                return
-            }
-
-            guard let data else {
-                DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog("Could not check for updates: empty server response.")
-                    }
-                }
-                return
-            }
-
-            guard let release = try? JSONDecoder().decode(GitHubLatestRelease.self, from: data) else {
-                DispatchQueue.main.async {
-                    if manual { self.showUpdateErrorDialog("Could not parse release information.") }
-                }
-                return
-            }
-
-            guard let latestVersion = ParquetSemVer(strictTag: release.tag_name) else {
-                DispatchQueue.main.async {
-                    if manual {
-                        self.showUpdateErrorDialog("Could not check for updates: latest release tag is not valid semver (expected vX.Y.Z).")
-                    }
-                }
-                return
-            }
+            let release = releases[index]
 
             let currentVersion = ParquetSemVer(looseVersion: self.currentVersion()) ?? .zero
             let skippedVersion = defaults.string(forKey: SettingsKeys.skippedUpdateVersion) ?? ""
@@ -345,13 +327,7 @@ private final class AppModel: ObservableObject {
                 if !manual && latestVersion.normalized == skippedVersion {
                     return
                 }
-                guard let releaseURL = URL(string: release.html_url) else {
-                    DispatchQueue.main.async {
-                        if manual { self.showUpdateErrorDialog("Latest release URL is invalid.") }
-                    }
-                    return
-                }
-                guard self.updateValidator.isTrustedReleasePageURL(releaseURL, expectedTag: release.tag_name) else {
+                guard let releaseURL = self.trustedReleasePage(release) else {
                     DispatchQueue.main.async {
                         if manual {
                             self.showUpdateErrorDialog("Could not check for updates: latest release page URL is not trusted.")
@@ -359,35 +335,303 @@ private final class AppModel: ObservableObject {
                     }
                     return
                 }
+                let package = self.updatePackage(for: release, version: latestVersion.normalized)
                 DispatchQueue.main.async {
-                    self.showUpdateAvailableDialog(version: "v\(latestVersion.normalized)", skippedVersion: latestVersion.normalized, url: releaseURL)
+                    self.showUpdateAvailableDialog(
+                        version: "v\(latestVersion.normalized)" + (latestVersion.isPreRelease ? " (beta)" : ""),
+                        skippedVersion: latestVersion.normalized,
+                        url: releaseURL,
+                        package: package
+                    )
                 }
             } else if manual {
                 DispatchQueue.main.async {
                     self.showUpToDateDialog()
                 }
             }
+        }
+    }
+
+    private struct ReleaseFetchError: Error {
+        let message: String
+    }
+
+    // GitHub's release list from the trusted API URL; calls back on a background queue.
+    private func fetchReleases(_ completion: @escaping (Result<[GitHubRelease], ReleaseFetchError>) -> Void) {
+        var request = URLRequest(url: releaseCheckURL)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("ParquetQuickLookAndIndex", forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            if let error {
+                return completion(.failure(ReleaseFetchError(message: ParquetUpdateErrorMapper.describeNetworkError(error))))
+            }
+            guard let http = response as? HTTPURLResponse else {
+                return completion(.failure(ReleaseFetchError(message: "Could not check for updates: invalid server response.")))
+            }
+            guard self.updateValidator.isTrustedReleaseAPIResponseURL(http.url) else {
+                return completion(.failure(ReleaseFetchError(message: "Could not check for updates: response origin was not trusted.")))
+            }
+            guard (200...299).contains(http.statusCode) else {
+                return completion(.failure(ReleaseFetchError(message: ParquetUpdateErrorMapper.describeHTTPError(statusCode: http.statusCode, data: data))))
+            }
+            guard let data else {
+                return completion(.failure(ReleaseFetchError(message: "Could not check for updates: empty server response.")))
+            }
+            guard let releases = try? JSONDecoder().decode([GitHubRelease].self, from: data) else {
+                return completion(.failure(ReleaseFetchError(message: "Could not parse release information.")))
+            }
+            completion(.success(releases))
         }.resume()
     }
 
-    private func showUpdateAvailableDialog(version: String, skippedVersion: String, url: URL) {
+    private static func candidates(_ releases: [GitHubRelease]) -> [ParquetReleaseSelector.Candidate] {
+        releases.map {
+            ParquetReleaseSelector.Candidate(tag: $0.tag_name, isPreRelease: $0.prerelease ?? false, isDraft: $0.draft ?? false)
+        }
+    }
+
+    private func trustedReleasePage(_ release: GitHubRelease) -> URL? {
+        guard
+            let url = URL(string: release.html_url),
+            updateValidator.isTrustedReleasePageURL(url, expectedTag: release.tag_name)
+        else { return nil }
+        return url
+    }
+
+    // Shown in Updates only on a pre-release build.
+    var isPreReleaseBuild: Bool {
+        ParquetSemVer(looseVersion: currentVersion())?.isPreRelease ?? false
+    }
+
+    // From a beta back to the newest stable release, through the same signed install as updates.
+    // Automatic checks never downgrade; this explicit path also switches the channel to Stable.
+    func downgradeToStable() {
+        setStatus("Looking for the latest stable release…")
+        fetchReleases { [weak self] result in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                let releases: [GitHubRelease]
+                switch result {
+                case .failure(let error):
+                    self.showUpdateErrorDialog(error.message)
+                    return
+                case .success(let list):
+                    releases = list
+                }
+                let current = ParquetSemVer(looseVersion: self.currentVersion()) ?? .zero
+                guard
+                    let index = ParquetReleaseSelector.downgradeTarget(Self.candidates(releases), current: current),
+                    let target = ParquetSemVer(strictTag: releases[index].tag_name),
+                    let releasePage = self.trustedReleasePage(releases[index])
+                else {
+                    self.setStatus("No older stable release to downgrade to.")
+                    self.showUpdateErrorDialog("There is no stable release older than \(self.currentVersion()) to downgrade to. Newer stable releases are offered by Check for Updates.")
+                    return
+                }
+                let package = self.updatePackage(for: releases[index], version: target.normalized)
+
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.icon = NSApp.applicationIconImage
+                alert.messageText = "Downgrade to v\(target.normalized)?"
+                alert.informativeText = "\(self.appDisplayName) \(self.currentVersion()) is replaced by the stable release v\(target.normalized), and the release channel is set to Stable. The Spotlight importer is replaced too."
+                if package != nil {
+                    alert.informativeText += " The download's signature is checked before anything is replaced."
+                    alert.addButton(withTitle: "Downgrade")
+                } else {
+                    alert.informativeText += " This release has no signed download (or the app's folder is not writable), so it has to be installed from the release page."
+                    alert.addButton(withTitle: "Open Release Page")
+                }
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else {
+                    self.setStatus("Downgrade cancelled.")
+                    return
+                }
+                self.updateChannel = .stable
+                if let package {
+                    self.installUpdate(package, releasePage: releasePage, downgrade: true)
+                } else {
+                    NSWorkspace.shared.open(releasePage)
+                }
+            }
+        }
+    }
+
+    private func showUpdateAvailableDialog(version: String, skippedVersion: String, url: URL, package: UpdatePackage?) {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.icon = NSApp.applicationIconImage
         alert.messageText = "New Version Available"
         alert.informativeText = "\(appDisplayName) (\(currentVersion())) can be updated to \(version)."
+        if package != nil {
+            alert.informativeText += " Install Update downloads it, checks its signature, and restarts the app."
+            alert.addButton(withTitle: "Install Update")
+        }
         alert.addButton(withTitle: "Open Release Page")
         alert.addButton(withTitle: "Skip this version")
         alert.addButton(withTitle: "Later")
-        let response = alert.runModal()
+        var response = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        if let package {
+            if response == 0 {
+                installUpdate(package, releasePage: url)
+                return
+            }
+            response -= 1
+        }
         switch response {
-        case .alertFirstButtonReturn:
+        case 0:
             NSWorkspace.shared.open(url)
-        case .alertSecondButtonReturn:
+        case 1:
             let defaults = UserDefaults(suiteName: SettingsKeys.suite) ?? .standard
             defaults.set(skippedVersion, forKey: SettingsKeys.skippedUpdateVersion)
         default:
             break
+        }
+    }
+
+    // nil when the release has no signed ZIP, the app has no update key, or the app's folder is
+    // not writable: the dialog then only offers the release page.
+    private func updatePackage(for release: GitHubRelease, version: String) -> UpdatePackage? {
+        guard
+            Bundle.main.object(forInfoDictionaryKey: ParquetSelfUpdate.publicKeyInfoKey) is String,
+            fm.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path)
+        else { return nil }
+        func assetURL(_ name: String) -> URL? {
+            guard
+                let raw = release.assets?.first(where: { $0.name == name })?.browser_download_url,
+                let url = URL(string: raw),
+                updateValidator.isTrustedReleaseAssetURL(url, expectedTag: release.tag_name, expectedName: name)
+            else { return nil }
+            return url
+        }
+        guard
+            let zipURL = assetURL(ParquetSelfUpdate.zipAssetName(version: version)),
+            let signatureURL = assetURL(ParquetSelfUpdate.signatureAssetName(version: version))
+        else { return nil }
+        return UpdatePackage(tag: release.tag_name, version: version, zipURL: zipURL, signatureURL: signatureURL)
+    }
+
+    private enum UpdateInstallError: LocalizedError {
+        case failed(String)
+        var errorDescription: String? {
+            switch self {
+            case .failed(let message): return message
+            }
+        }
+    }
+
+    private func installUpdate(_ package: UpdatePackage, releasePage: URL, downgrade: Bool = false) {
+        setStatus("Downloading \(downgrade ? "release" : "update") \(package.version)…")
+        Task {
+            do {
+                let newApp = try await downloadAndVerifyUpdate(package)
+                await MainActor.run { self.swapInUpdate(newApp, version: package.version, downgrade: downgrade) }
+            } catch {
+                await MainActor.run {
+                    self.setStatus("Update failed: \(error.localizedDescription)", error: true)
+                    self.showUpdateInstallFailedDialog(error.localizedDescription, releasePage: releasePage)
+                }
+            }
+        }
+    }
+
+    // Downloads next to the installed app (same volume, so the swap is a rename), verifies the
+    // Ed25519 signature before unpacking, and checks the unpacked bundle. Returns the new app.
+    private func downloadAndVerifyUpdate(_ package: UpdatePackage) async throws -> URL {
+        guard let publicKey = Bundle.main.object(forInfoDictionaryKey: ParquetSelfUpdate.publicKeyInfoKey) as? String else {
+            throw UpdateInstallError.failed("This build has no update key.")
+        }
+        let workDir = try fm.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: Bundle.main.bundleURL,
+            create: true
+        )
+
+        func fetch(_ url: URL) async throws -> Data {
+            var request = URLRequest(url: url)
+            request.setValue("ParquetQuickLookAndIndex", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw UpdateInstallError.failed("Download failed: \(url.lastPathComponent).")
+            }
+            return data
+        }
+        let zipData = try await fetch(package.zipURL)
+        let signature = String(decoding: try await fetch(package.signatureURL), as: UTF8.self)
+        guard ParquetSelfUpdate.isValidSignature(signature, for: zipData, publicKeyBase64: publicKey) else {
+            throw UpdateInstallError.failed("The update's signature is not valid; nothing was installed.")
+        }
+
+        let zipPath = workDir.appendingPathComponent(ParquetSelfUpdate.zipAssetName(version: package.version))
+        try zipData.write(to: zipPath)
+        guard run("/usr/bin/ditto", ["-x", "-k", zipPath.path, workDir.path]) == 0 else {
+            throw UpdateInstallError.failed("Could not unpack the update.")
+        }
+        let newApp = workDir
+            .appendingPathComponent("Parquet-Spotlight-\(package.version)")
+            .appendingPathComponent(Bundle.main.bundleURL.lastPathComponent)
+        let info = Bundle(url: newApp)?.infoDictionary
+        guard
+            info?["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
+            info.map(Self.releaseVersion(info:)) == package.version
+        else {
+            throw UpdateInstallError.failed("The downloaded app is not \(appDisplayName) \(package.version).")
+        }
+        guard run("/usr/bin/codesign", ["--verify", "--deep", "--strict", newApp.path]) == 0 else {
+            throw UpdateInstallError.failed("The downloaded app failed code signature verification.")
+        }
+        run("/usr/bin/xattr", ["-cr", newApp.path])
+        return newApp
+    }
+
+    // The running app cannot replace itself: a helper waits for it to quit, moves it aside into
+    // the update's temporary folder (same volume; the system clears it), moves the new app into
+    // place and relaunches it. The new app then updates the Spotlight importer on launch
+    // (autoInstallOrUpdateImporter).
+    //
+    // A downgrade removes the installed importer first: the older app never replaces a newer
+    // importer, but installs a missing one on launch. If the swap fails, the restored app does too.
+    private func swapInUpdate(_ newApp: URL, version: String, downgrade: Bool = false) {
+        let installed = Bundle.main.bundleURL
+        let workDir = newApp.deletingLastPathComponent().deletingLastPathComponent()
+        let trash = workDir.appendingPathComponent("previous-\(currentVersion()).app")
+        let status = run(
+            ParquetSelfUpdate.shellPath,
+            ParquetSelfUpdate.shellArguments(
+                waitingForPID: ProcessInfo.processInfo.processIdentifier,
+                installedAppPath: installed.path,
+                newAppPath: newApp.path,
+                trashPath: trash.path,
+                relaunch: true
+            )
+        )
+        guard status == 0 else {
+            setStatus("Update failed: could not start the installer helper.", error: true)
+            return
+        }
+        if downgrade, fm.fileExists(atPath: spotlightDst.path) {
+            try? fm.removeItem(at: spotlightDst)
+        }
+        setStatus("Installing \(version); the app restarts.")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func showUpdateInstallFailedDialog(_ message: String, releasePage: URL) {
+        appendError(message)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = NSApp.applicationIconImage
+        alert.messageText = "Update Not Installed"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Open Release Page")
+        alert.addButton(withTitle: "OK")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(releasePage)
         }
     }
 
@@ -412,8 +656,14 @@ private final class AppModel: ObservableObject {
         alert.runModal()
     }
 
-    private func currentVersion() -> String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+    // Full version including a beta suffix (`ParquetReleaseVersion`, e.g. 0.7.0-beta.1);
+    // CFBundleShortVersionString stays numeric for macOS.
+    func currentVersion() -> String {
+        Self.releaseVersion(info: Bundle.main.infoDictionary ?? [:])
+    }
+
+    private static func releaseVersion(info: [String: Any]) -> String {
+        (info["ParquetReleaseVersion"] as? String) ?? (info["CFBundleShortVersionString"] as? String) ?? "0.0.0"
     }
 
     func refreshStatus() {
@@ -467,13 +717,34 @@ private final class AppModel: ObservableObject {
         }
     }
 
-    func autoInstallImporterIfMissing() {
+    func autoInstallOrUpdateImporter() {
         refreshStatus()
-        guard !importerInstalled else { return }
+        if !importerInstalled {
+            install()
+            refreshStatus()
+            if importerInstalled {
+                setStatus("Spotlight importer auto-installed.")
+            }
+            return
+        }
+
+        // Replacing the app does not touch ~/Library/Spotlight; update an older importer there.
+        guard
+            fm.fileExists(atPath: spotlightDst.path),
+            let bundledImporter = Bundle.main.url(forResource: "Parquet", withExtension: "mdimporter")
+        else { return }
+        let installed = Bundle(url: spotlightDst)?.infoDictionary
+        let bundled = Bundle(url: bundledImporter)?.infoDictionary
+        let installedVersion = installed?["CFBundleShortVersionString"] as? String
+        guard ParquetImporterUpdate.shouldReplace(
+            installedVersion: installedVersion,
+            installedBuild: installed?["CFBundleVersion"] as? String,
+            bundledVersion: bundled?["CFBundleShortVersionString"] as? String,
+            bundledBuild: bundled?["CFBundleVersion"] as? String
+        ) else { return }
         install()
-        refreshStatus()
         if importerInstalled {
-            setStatus("Spotlight importer auto-installed.")
+            setStatus("Spotlight importer updated from \(installedVersion ?? "unknown") to \(currentVersion()).")
         }
     }
 
@@ -525,8 +796,10 @@ private final class AppModel: ObservableObject {
             run("/usr/bin/killall", ["quicklookd", "QuickLookUIService", "Finder"])
 
             // Remove this app asynchronously after termination.
-            let appPath = Bundle.main.bundleURL.path.replacingOccurrences(of: "\"", with: "\\\"")
-            run("/bin/sh", ["-lc", "(sleep 1; rm -rf \"\(appPath)\") >/dev/null 2>&1 &"])
+            run(
+                ParquetSelfRemoval.shellPath,
+                ParquetSelfRemoval.shellArguments(forRemovingBundleAt: Bundle.main.bundleURL.path)
+            )
             setStatus("Uninstall complete. App will close.")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 NSApp.terminate(nil)
@@ -839,6 +1112,14 @@ private struct ContentView: View {
                     .tag(SidebarPane.updates)
             }
             .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom) {
+                Text("Version \(model.currentVersion())")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+            }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 220)
         } detail: {
             Group {
@@ -1006,8 +1287,23 @@ private struct ContentView: View {
                     }
                 }
                 .disabled(!model.autoCheckUpdates)
+                Picker("Release channel", selection: $model.updateChannel) {
+                    Text("Stable").tag(ParquetUpdateChannel.stable)
+                    Text("Beta").tag(ParquetUpdateChannel.beta)
+                }
+                Text("Beta also offers pre-releases. Switching back to Stable never downgrades: you stay on the beta until a newer stable release is out.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Button("Check for Updates Now") {
                     model.checkForUpdates(manual: true)
+                }
+                if model.isPreReleaseBuild {
+                    Button("Downgrade to Stable…") {
+                        model.downgradeToStable()
+                    }
+                    Text("Installs the newest stable release (signed download) and switches the channel to Stable.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -1032,24 +1328,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let root = ContentView(model: model)
-        let hosting = NSHostingView(rootView: root)
 
+        // Full-size content lets NavigationSplitView share the window's toolbar; without it
+        // SwiftUI draws a second toolbar band whose scroll-edge blur covers the first section header.
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.center()
         window.title = "\(appName) Manager"
-        window.contentView = hosting
+        window.toolbarStyle = .unified
+        window.contentViewController = NSHostingController(rootView: root)
+        window.setContentSize(NSSize(width: 760, height: 560))
+        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
 
         setupMenu()
         DispatchQueue.main.async { [weak self] in
-            self?.model.autoInstallImporterIfMissing()
+            self?.model.autoInstallOrUpdateImporter()
             self?.model.autoCheckForUpdatesIfNeeded()
         }
     }
