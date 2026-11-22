@@ -1,24 +1,25 @@
 # parquet_indexer (Spotlight Importer for `.parquet`)
 
 > [!WARNING]
-> **This repository was written completely using Codex.**
-> **Model:** GPT-5 (Codex coding agent)
-> **Version:** Codex GPT-5 session build (2026-03-12)
+> **This repository is written with an AI coding agent: [Claude Code](https://claude.com/claude-code) (Anthropic, Claude Opus 5.5).**
 > It works for me, but I take no guarantee if it works for you.
+
+This README describes the current stable release, **0.7.1**. Pre-releases with newer features are available on the [beta channel](#beta-channel-070-beta1-onwards).
 
 This project provides:
 
-- a macOS Spotlight importer (`.mdimporter`) for Parquet metadata indexing
-- a modern Quick Look preview extension (`.appex`, embedded in a host app) for Parquet metadata preview with:
-  - hierarchical schema tree (collapsible groups)
-  - full parsed column list (no preview truncation)
-  - Arrow-style logical scalar type labels where available
+- a macOS Spotlight importer (`.mdimporter`) that indexes Parquet footer metadata: validity, sizes, row and column counts, column names and types, hive partitions, the writer (`created_by`), footer key/value metadata keys, and the date range of date/timestamp columns (from the column statistics)
+- a modern Quick Look preview extension (`.appex`, embedded in a host app) with:
+  - hierarchical schema tree (collapsible groups), the full column list, Arrow-style logical type labels
+  - footer details: writer, row groups, compressed/uncompressed sizes, codec and date range per column, key/value metadata
+  - `Show JSON` / `Copy JSON`: the schema as Arrow-friendly JSON for reuse in R/Python, in a versioned envelope (`parquet-quicklook-arrow-schema-v1`)
+  - dataset folders (and `*.parquet_ds` folders): file and row totals, merged schema, hive partition values
 - a small GUI manager app (`Parquet Quick Look and Index.app`) with:
   - `Re-Install`, `Repair Registration`, and `Uninstall` actions
   - `Copy Diagnostic Report` action for support/issue reports (anonymized)
   - Quick Look rendering settings (schema display + dataset scan controls)
-  - dedicated `Updates` tab for release checks (`Daily`/`Weekly`/`Monthly`)
-  - automatic importer install on app launch if missing
+  - `Updates` tab: automatic checks (`Daily`/`Weekly`/`Monthly`), in-app install of signed updates, `Stable`/`Beta` release channel, `Downgrade to Stable…` on beta builds
+  - automatic importer install and update on app launch
 
 Since `0.3.0`, naming is standardized to Apple's official **Quick Look** terminology.
 
@@ -26,10 +27,10 @@ The importer reads only Parquet footer metadata (`...<metadata_len><PAR1>`), doe
 
 ## Prerequisites
 
-- **Minimum supported macOS version: 12.0 (Monterey).**
+- **Minimum supported macOS version: 13.0 (Ventura).** Builds are universal (Apple silicon and Intel).
 
 - macOS with Spotlight enabled
-- Xcode Command Line Tools (`xcrun`, `clang`, `codesign`)
+- Xcode Command Line Tools (`xcrun`, `clang`, `swiftc`, `codesign`)
 - shell access (`zsh`)
 - permission to write to `~/Library/Spotlight` and `~/Applications`
 
@@ -65,20 +66,21 @@ The build script also:
 Automate build + DMG + GitHub release upload:
 
 ```bash
-./scripts/release.sh v0.4.2
+./scripts/release.sh v0.7.1
 ```
 
 What it does:
 
 - runs `./scripts/generate_icon.sh` and `./scripts/build.sh`
-- creates `release/Parquet-Spotlight-0.4.2.dmg`
-- creates `release/Parquet-Spotlight-0.4.2.zip`
-- creates `release/Parquet-Spotlight-0.4.2.dmg.sha256`
+- creates `release/Parquet-Spotlight-<version>.dmg`, `.zip` and `.dmg.sha256`
 - creates or updates the GitHub release tag and uploads those assets
 - verifies release preflight before packaging:
-  - current branch is `main`
+  - the tag matches the app version (`ParquetReleaseVersion`, else `CFBundleShortVersionString`)
+  - current branch is `main` (`dev` is also allowed for pre-release tags such as `v0.8.0-beta.1`, which become GitHub pre-releases)
   - working tree is clean
-  - local `main` is fully synced with upstream
+  - the branch is fully synced with upstream
+
+Publishing a release also runs `.github/workflows/release.yml`, which builds the assets on GitHub and signs the ZIP for in-app updates (see [Update](#update)).
 
 Optional flags:
 
@@ -98,9 +100,39 @@ Typical asset name:
 Unsigned app note (important):
 
 - Releases are currently unsigned (ad-hoc signed for local loading, but not Apple Developer ID notarized).
-- On first launch, macOS may block the app with a security warning.
-- If blocked, right-click the app and choose `Open`, or go to:
+- On first launch, Gatekeeper blocks the app with a security warning.
+- To allow it, try to open the app once, then go to:
   - `System Settings -> Privacy & Security -> Open Anyway`
+- On macOS 13/14, right-click the app and choosing `Open` also works; macOS 15 and later removed that shortcut.
+- Alternatively, remove the download quarantine flag after copying the app:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Parquet Quick Look and Index.app"
+```
+
+## Update
+
+### In-app (0.6.0 onwards)
+
+When `Check for Updates` (menu or `Updates` tab) finds a newer release, click `Install Update`. The app downloads the release ZIP, verifies its Ed25519 signature against the key built into the app, checks the unpacked app (bundle ID, version, code signature), then quits, swaps itself in place, and relaunches; the new app updates the Spotlight importer on launch. If the release has no signature, the app's folder is not writable, or any check fails, nothing is installed and the release page is offered instead.
+
+### Beta channel (0.7.0-beta.1 onwards)
+
+`Updates` → `Release channel`: `Stable` (default) offers only regular releases; `Beta` also offers pre-releases (tags like `v0.8.0-beta.1`, published as GitHub pre-releases, signed and installed the same way). Switching back to `Stable` never downgrades: a beta stays installed until a newer stable release is out (e.g. `0.8.0` after `0.8.0-beta.2`). Apps older than 0.7.0-beta.1 only see stable releases.
+
+The current beta, [0.8.0-beta.1](https://github.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.8.0-beta.1), adds a Quick Look `Data` tab with the first rows of files and datasets (including nested values) and `Reinstall Latest Release…`.
+
+To leave a beta right away, use `Updates` → `Downgrade to Stable…` (beta builds from 0.7.1-beta.1 on): it installs the newest stable release with the same signature checks, switches the channel to Stable, and replaces the Spotlight importer with the stable one.
+
+Signing for maintainers: `swift scripts/sign_update.swift keygen` creates a key pair once. The private key goes into the GitHub secret `PARQUET_UPDATE_SIGNING_KEY` (the release workflow then uploads `Parquet-Spotlight-<version>.zip.sig`), the public key into `ParquetUpdatePublicKey` in `preview/app/Info.plist`.
+
+### Manually
+
+1. Quit `Parquet Quick Look and Index` if it is running.
+2. Replace `Parquet Quick Look and Index.app` in `/Applications` with the one from the new DMG.
+3. Open the app once. On launch it replaces the Spotlight importer in `~/Library/Spotlight` when the bundled one is newer, re-registers it, and Spotlight re-indexes your Parquet files. The sidebar shows the new version.
+
+Versions before 0.5.1 do not have this check: when installing 0.5.0 or older, click `Re-Install` once. `Repair Registration` re-registers but keeps the installed importer.
 
 ## Rollback (Revert To A Previous Version)
 
@@ -112,7 +144,7 @@ If a new release causes problems:
 ```
 2. Download an older DMG from:
    - [GitHub Releases](https://github.com/rkrug/parquet-spotlight-quicklook/releases)
-3. Install that older app and run `Re-Install` (or `Repair Registration`) once.
+3. Install that older app and run `Re-Install` once (the app never downgrades the importer on its own, and `Repair Registration` keeps the installed importer).
 
 Optional verification after rollback:
 
@@ -132,7 +164,7 @@ Install for current user:
 This installs and registers:
 
 - `~/Library/Spotlight/Parquet.mdimporter`
-- `~/Applications/Parquet Quick Look and Index.app` (embedded modern Quick Look extension)
+- `~/Applications/Parquet Quick Look and Index.app` (embedded modern Quick Look extension), or the existing copy in `/Applications` if the app was installed from the DMG
 
 Use `Parquet Quick Look and Index.app` from `~/Applications` to:
 
@@ -141,7 +173,7 @@ Use `Parquet Quick Look and Index.app` from `~/Applications` to:
 - repair registration and refresh caches
 - uninstall importer + Quick Look app (including settings cleanup)
 - change preview settings used by Quick Look
-- check for updates (menu item + Updates tab), with `Skip this version` option
+- check for updates (menu item + Updates tab) and install them in the app, with `Skip this version` option
 
 ## Uninstall
 
@@ -236,7 +268,7 @@ Dataset scan behavior is controlled in app settings:
 - `Max files (if not all)`
 - `Recursive scan folders`
 
-7. Run script + core logic test suite:
+7. Run script + core logic test suite (this is what CI runs):
 
 ```bash
 ./scripts/test_scripts.sh
@@ -246,9 +278,12 @@ This also runs:
 
 ```bash
 ./scripts/test_core.sh
+./scripts/test_importer_summary.sh
 ```
 
-`test_core.sh` validates trusted update URL/tag checks, version comparisons, error mapping, and diagnostics redaction rules.
+`test_core.sh` validates trusted update URL/tag checks, version and release-channel logic, update signatures, error mapping, diagnostics redaction rules, uninstall argument construction, parser sanity bounds, and the footer parser against the fixtures in `Tests/fixtures`, including a seeded fuzz pass over corrupted footers (`PARQUET_FUZZ_SEED` / `PARQUET_FUZZ_CASES`).
+
+`test_importer_summary.sh` calls the Spotlight importer's entry point on the same fixtures. Both tests compare with `Tests/fixtures/expected.txt`, whose row and column counts come from Apache Arrow; regenerate fixtures with `Rscript Tests/fixtures/make_fixtures.R` (needs the R `arrow` package).
 
 ## Search
 
@@ -270,6 +305,9 @@ mdfind 'com_rkrug_parquet_row_count > 1000000'
 mdfind 'com_rkrug_parquet_column_count > 100'
 mdfind 'com_rkrug_parquet_columns == "species"'
 mdfind 'kMDItemKeywords == "col-species"'
+mdfind 'com_rkrug_parquet_partitions == "year=2024"'
+mdfind 'com_rkrug_parquet_column_types == "*:timestamp*"'
+mdfind 'kMDItemKeywords == "part-year-2024"'
 ```
 
 ## Troubleshooting
@@ -323,7 +361,7 @@ mdimport /path/to/folder
 Use this instead:
 
 ```bash
-pluginkit -m -p com.apple.quicklook.preview | rg parquet
+pluginkit -m -p com.apple.quicklook.preview | grep parquet
 ```
 
 Spotlight indexing via `.mdimporter` is independent and unaffected.
@@ -337,6 +375,7 @@ Standard Spotlight fields:
 - `kMDItemDescription`
 - `kMDItemKeywords`
 - `kMDItemTextContent` (metadata tokens only; no row text)
+- `kMDItemCreator` (the writer from the footer's `created_by`, e.g. `parquet-cpp-arrow version 24.0.0`)
 
 Custom Parquet fields:
 
@@ -346,6 +385,10 @@ Custom Parquet fields:
 - `com_rkrug_parquet_row_count` (`CFNumber`)
 - `com_rkrug_parquet_column_count` (`CFNumber`)
 - `com_rkrug_parquet_columns` (`CFString`, multivalued)
+- `com_rkrug_parquet_column_types` (`CFString`, multivalued)
+- `com_rkrug_parquet_partitions` (`CFString`, multivalued)
+- `com_rkrug_parquet_metadata_keys` (`CFString`, multivalued)
+- `com_rkrug_parquet_date_min` / `com_rkrug_parquet_date_max` (`CFDate`)
 
 ## Queryable `mdfind` Properties
 
@@ -362,7 +405,7 @@ Custom Parquet fields:
   - Example: `mdfind 'com_rkrug_parquet_footer_length > 50000'`
 
 - `com_rkrug_parquet_row_count` (`CFNumber`):
-  - Best-effort extracted row count from footer metadata.
+  - Row count from the Parquet footer (file `num_rows`, or the sum over row groups).
   - Example: `mdfind 'com_rkrug_parquet_row_count > 1000000'`
 
 - `com_rkrug_parquet_column_count` (`CFNumber`):
@@ -370,8 +413,28 @@ Custom Parquet fields:
   - Example: `mdfind 'com_rkrug_parquet_column_count > 100'`
 
 - `com_rkrug_parquet_columns` (`CFString`, multivalued):
-  - Best-effort extracted column names from footer metadata.
+  - Leaf column paths parsed from the footer schema (nested fields joined with `.`, e.g. `point.x`, `tags.list.element`).
   - Example: `mdfind 'com_rkrug_parquet_columns == "Species"'`
+
+- `com_rkrug_parquet_column_types` (`CFString`, multivalued):
+  - `name:type` per leaf column, with the Arrow-style logical type shown in Quick Look, e.g. `species:string`, `ts:timestamp[us]`, `amount:decimal(10,2)`.
+  - Example: `mdfind 'com_rkrug_parquet_column_types == "*:timestamp*"'`
+
+- `com_rkrug_parquet_partitions` (`CFString`, multivalued):
+  - Hive-style partitions from the file's folder path (`key=value` folder names, outermost first, values percent-decoded), e.g. `year=2024` for `.../year=2024/region=EU/part-0.parquet`. Taken from the path only; row data is never read.
+  - Example: `mdfind 'com_rkrug_parquet_partitions == "year=2024"'`
+
+- `kMDItemCreator` (`CFString`):
+  - The program that wrote the file (footer `created_by`), e.g. `parquet-cpp-arrow version 24.0.0`, DuckDB, Spark.
+  - Example: `mdfind 'kMDItemCreator == "*duckdb*"c'`
+
+- `com_rkrug_parquet_metadata_keys` (`CFString`, multivalued):
+  - Keys of the footer key/value metadata (e.g. `ARROW:schema`, `pandas`, custom keys); values are not indexed.
+  - Example: `mdfind 'com_rkrug_parquet_metadata_keys == "pandas"'`
+
+- `com_rkrug_parquet_date_min` / `com_rkrug_parquet_date_max` (`CFDate`):
+  - Earliest and latest value over all date and timestamp columns, from the footer's column statistics (no row data is read). Timestamps are read as UTC; columns without statistics are left out, and files without date/timestamp statistics have neither attribute.
+  - Example (files with data from 2024): `mdfind 'com_rkrug_parquet_date_max >= $time.iso(2024-01-01) && com_rkrug_parquet_date_min < $time.iso(2025-01-01)'`
 
 - `kMDItemKeywords` (`CFString`, multivalued):
   - Includes generated tokens such as `col-<column_name>`, `parquet-valid`, `parquet-footer-<N>`.
@@ -386,15 +449,20 @@ Keyword tokens written by importer:
 - `parquet-rows-<N>`
 - `parquet-cols-<N>`
 - `col-<column_name>`
+- `part-<key>-<value>` (hive partitions, e.g. `part-year-2024`)
+- `meta-<key>` (footer key/value metadata keys, e.g. `meta-pandas`)
 
 ## Notes
 
-- UTI: `com.rkrug.parquet`
+- UTI: `com.rkrug.parquet` (`.parquet` files, "Apache Parquet File") and `com.rkrug.parquet-database` (folders named `*.parquet_ds`, "Parquet Database"; a normal folder, not a package). Both are declared by the app and registered once it has been launched; Quick Look shows the dataset summary for `.parquet_ds` folders.
 - Bundle ID: `com.rkrug.parquetindexer.importer`
 - Plugin factory UUID: `0E198062-E6D8-4AC2-BBCE-FB860A43A116`
 - Preview extension bundle ID: `com.rkrug.parquetindexer.previewhost.preview`
 - Quick Look host app bundle ID: `com.rkrug.parquetindexer.previewhost`
+- The importer extracts column names only from footers up to 16 MiB and indexes at most 4096 columns per file; larger footers are still indexed as Parquet files, without column names.
+- Quick Look shows footer details below the schema: writer, row groups, compressed/uncompressed size, date range, codec and size per column, and the key/value metadata (at most 200 row groups and 256 metadata entries listed; values cut to 4 KiB).
+- Quick Look preview parsing bounds nesting depth, declared container sizes, and skip work, and saturates dataset size/row totals. Well-formed files render as before; malformed footers are rejected.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](/Users/rkrug/Documents/GitHub/parquet_indexer/LICENSE).
+This project is licensed under the MIT License. See [LICENSE](LICENSE).

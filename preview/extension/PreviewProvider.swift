@@ -5,29 +5,13 @@ import UniformTypeIdentifiers
 
 @objc(PreviewProvider)
 final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
-    struct ColumnInfo {
-        let name: String
-        let logicalType: String
-        let physicalType: String
-    }
+    private static let versionSuffix: String =
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String).map { " (v\($0))" } ?? ""
 
-    struct Metadata {
-        var valid = false
-        var fileSize: UInt64 = 0
-        var footerLength: UInt32 = 0
-        var rowCount: Int64 = 0
-        var columns: [ColumnInfo] = []
-    }
+    typealias ColumnInfo = ParquetFooter.Column
+    typealias Metadata = ParquetFooter.Summary
 
-    struct DatasetMetadata {
-        var fileCount: Int = 0
-        var validFileCount: Int = 0
-        var totalSize: UInt64 = 0
-        var totalRows: Int64 = 0
-        var columns: [ColumnInfo] = []
-        var partitionValuesByKey: [String: Set<String>] = [:]
-        var truncated = false
-    }
+    typealias DatasetMetadata = ParquetDataset.Summary
 
     private struct ScanLimits {
         static let maxPartitionValuesPerKey = 25
@@ -81,191 +65,43 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         let isGroup: Bool
     }
 
-    private struct SchemaElement {
+    private struct ExportField: Codable {
         let name: String
-        let type: Int32?
-        let convertedType: Int32?
-        let logicalType: String?
-        let numChildren: Int
+        let type: String
+        let children: [ExportField]
     }
 
-    private struct ParsedFooter {
+    private struct ExportFlatField: Codable {
+        let path: String
+        let type: String
+        let physicalType: String
+    }
+
+    private enum SchemaExportFormat: String {
+        case arrowJSONV1 = "parquet-quicklook-arrow-schema-v1"
+    }
+
+    private struct SchemaExportScheme: Codable {
+        let id: String
+        let version: Int
+        let title: String
+        let description: String
+    }
+
+    private struct SchemaExportPayload: Codable {
+        let format: String
+        let sourcePath: String
         let rowCount: Int64
-        let columns: [ColumnInfo]
+        let columnCount: Int
+        let fields: [ExportField]
+        let flatFields: [ExportFlatField]
+        let pythonSnippet: String
+        let rSnippet: String
     }
 
-    private enum CompactType: UInt8 {
-        case stop = 0x00
-        case booleanTrue = 0x01
-        case booleanFalse = 0x02
-        case byte = 0x03
-        case i16 = 0x04
-        case i32 = 0x05
-        case i64 = 0x06
-        case double = 0x07
-        case binary = 0x08
-        case list = 0x09
-        case set = 0x0a
-        case map = 0x0b
-        case `struct` = 0x0c
-    }
-
-    private enum ParserError: Error {
-        case outOfBounds
-        case invalidData
-    }
-
-    private struct CompactParser {
-        private let bytes: [UInt8]
-        private(set) var index: Int = 0
-
-        init(data: Data) {
-            self.bytes = [UInt8](data)
-        }
-
-        mutating func readByte() throws -> UInt8 {
-            guard index < bytes.count else { throw ParserError.outOfBounds }
-            let b = bytes[index]
-            index += 1
-            return b
-        }
-
-        mutating func skip(_ count: Int) throws {
-            guard count >= 0, index + count <= bytes.count else { throw ParserError.outOfBounds }
-            index += count
-        }
-
-        mutating func readVarint() throws -> UInt64 {
-            var shift: UInt64 = 0
-            var result: UInt64 = 0
-            while true {
-                let b = try readByte()
-                result |= UInt64(b & 0x7f) << shift
-                if (b & 0x80) == 0 {
-                    return result
-                }
-                shift += 7
-                if shift > 63 {
-                    throw ParserError.invalidData
-                }
-            }
-        }
-
-        mutating func readZigZag() throws -> Int64 {
-            let v = try readVarint()
-            let decoded = Int64(bitPattern: (v >> 1) ^ (~(v & 1) &+ 1))
-            return decoded
-        }
-
-        mutating func readFieldHeader(lastFieldID: inout Int16) throws -> (fieldID: Int16, type: UInt8)? {
-            let header = try readByte()
-            if header == CompactType.stop.rawValue {
-                return nil
-            }
-
-            let type = header & 0x0f
-            let delta = Int16(header >> 4)
-            let fieldID: Int16
-            if delta == 0 {
-                let decoded = try readZigZag()
-                guard decoded >= Int64(Int16.min), decoded <= Int64(Int16.max) else {
-                    throw ParserError.invalidData
-                }
-                fieldID = Int16(decoded)
-            } else {
-                fieldID = lastFieldID + delta
-            }
-            lastFieldID = fieldID
-            return (fieldID, type)
-        }
-
-        mutating func readBinaryData() throws -> Data {
-            let length = try readVarint()
-            guard length <= UInt64(Int.max) else { throw ParserError.invalidData }
-            let len = Int(length)
-            guard index + len <= bytes.count else { throw ParserError.outOfBounds }
-            let d = Data(bytes[index..<(index + len)])
-            index += len
-            return d
-        }
-
-        mutating func readListHeader() throws -> (elementType: UInt8, size: Int) {
-            let header = try readByte()
-            let elementType = header & 0x0f
-            var size = Int(header >> 4)
-            if size == 15 {
-                let v = try readVarint()
-                guard v <= UInt64(Int.max) else { throw ParserError.invalidData }
-                size = Int(v)
-            }
-            return (elementType, size)
-        }
-
-        mutating func skipValue(type: UInt8) throws {
-            switch type {
-            case CompactType.booleanTrue.rawValue, CompactType.booleanFalse.rawValue:
-                return
-            case CompactType.byte.rawValue:
-                _ = try readByte()
-            case CompactType.i16.rawValue, CompactType.i32.rawValue, CompactType.i64.rawValue:
-                _ = try readVarint()
-            case CompactType.double.rawValue:
-                try skip(8)
-            case CompactType.binary.rawValue:
-                _ = try readBinaryData()
-            case CompactType.list.rawValue, CompactType.set.rawValue:
-                let (elementType, size) = try readListHeader()
-                for _ in 0..<size {
-                    try skipValue(type: elementType)
-                }
-            case CompactType.map.rawValue:
-                let size = try readVarint()
-                if size == 0 {
-                    return
-                }
-                let kv = try readByte()
-                let keyType = kv >> 4
-                let valueType = kv & 0x0f
-                guard size <= UInt64(Int.max) else { throw ParserError.invalidData }
-                for _ in 0..<Int(size) {
-                    try skipValue(type: keyType)
-                    try skipValue(type: valueType)
-                }
-            case CompactType.struct.rawValue:
-                var lastFieldID: Int16 = 0
-                while let (_, nestedType) = try readFieldHeader(lastFieldID: &lastFieldID) {
-                    try skipValue(type: nestedType)
-                }
-            default:
-                throw ParserError.invalidData
-            }
-        }
-
-        mutating func readInt64ForType(_ type: UInt8) throws -> Int64 {
-            switch type {
-            case CompactType.booleanTrue.rawValue:
-                return 1
-            case CompactType.booleanFalse.rawValue:
-                return 0
-            case CompactType.byte.rawValue:
-                return Int64(Int8(bitPattern: try readByte()))
-            case CompactType.i16.rawValue, CompactType.i32.rawValue, CompactType.i64.rawValue:
-                return try readZigZag()
-            default:
-                throw ParserError.invalidData
-            }
-        }
-
-        mutating func readBoolForType(_ type: UInt8) throws -> Bool {
-            switch type {
-            case CompactType.booleanTrue.rawValue:
-                return true
-            case CompactType.booleanFalse.rawValue:
-                return false
-            default:
-                return (try readInt64ForType(type)) != 0
-            }
-        }
+    private struct SchemaExportEnvelope: Codable {
+        let scheme: SchemaExportScheme
+        let payload: SchemaExportPayload
     }
 
     func providePreview(for request: QLFilePreviewRequest,
@@ -299,617 +135,16 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
     }
 
     private func readMetadata(at url: URL) -> Metadata {
-        var out = Metadata()
-
-        guard let fh = try? FileHandle(forReadingFrom: url) else {
-            return out
-        }
-        defer { try? fh.close() }
-
-        let fileSize = (try? fh.seekToEnd()) ?? 0
-        guard fileSize >= 12 else {
-            return out
-        }
-        out.fileSize = fileSize
-
-        do {
-            try fh.seek(toOffset: fileSize - 8)
-            let trailer = try fh.read(upToCount: 8) ?? Data()
-            guard trailer.count == 8 else { return out }
-            guard trailer.suffix(4) == Data("PAR1".utf8) else { return out }
-
-            let footerLen = trailer.prefix(4).withUnsafeBytes { raw -> UInt32 in
-                let b = raw.bindMemory(to: UInt8.self)
-                return UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
-            }
-            out.footerLength = footerLen
-
-            let footerOffset = Int64(fileSize) - 8 - Int64(footerLen)
-            guard footerOffset >= 0 else { return out }
-
-            try fh.seek(toOffset: UInt64(footerOffset))
-            let footer = try fh.read(upToCount: Int(footerLen)) ?? Data()
-            guard footer.count == Int(footerLen) else { return out }
-
-            let parsed = parseFooterMetadata(footer)
-            out.rowCount = parsed.rowCount
-            out.columns = parsed.columns
-            out.valid = true
-            return out
-        } catch {
-            return out
-        }
+        ParquetFooter.read(at: url)
     }
 
     private func readDatasetMetadata(at folderURL: URL, settings: PreviewSettings) -> DatasetMetadata? {
-        let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
-        var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
-        if !settings.recursiveScan {
-            options.insert(.skipsSubdirectoryDescendants)
-        }
-        guard let enumerator = fm.enumerator(
+        ParquetDataset.summarize(
             at: folderURL,
-            includingPropertiesForKeys: keys,
-            options: options
-        ) else {
-            return nil
-        }
-
-        var dataset = DatasetMetadata()
-        var typeMap: [String: Set<String>] = [:]
-        var firstPhysical: [String: String] = [:]
-        let maxFilesToScan = settings.scanAllFiles ? Int.max : max(1, settings.maxScanFiles)
-
-        for case let fileURL as URL in enumerator {
-            let ext = fileURL.pathExtension.lowercased()
-            if ext != "parquet" {
-                continue
-            }
-
-            dataset.fileCount += 1
-            if dataset.fileCount > maxFilesToScan {
-                dataset.truncated = true
-                break
-            }
-
-            if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0 {
-                dataset.totalSize += UInt64(size)
-            }
-
-            parsePartitionSegments(from: fileURL, baseFolder: folderURL) { key, value in
-                var values = dataset.partitionValuesByKey[key] ?? Set<String>()
-                if values.count < ScanLimits.maxPartitionValuesPerKey {
-                    values.insert(value)
-                }
-                dataset.partitionValuesByKey[key] = values
-            }
-
-            let fileMetadata = readMetadata(at: fileURL)
-            if !fileMetadata.valid {
-                continue
-            }
-            dataset.validFileCount += 1
-            dataset.totalRows += max(0, fileMetadata.rowCount)
-
-            for col in fileMetadata.columns {
-                var types = typeMap[col.name] ?? Set<String>()
-                types.insert(col.logicalType)
-                typeMap[col.name] = types
-                if firstPhysical[col.name] == nil {
-                    firstPhysical[col.name] = col.physicalType
-                }
-            }
-        }
-
-        if dataset.fileCount == 0 {
-            return nil
-        }
-
-        let sortedColumns = typeMap.keys.sorted()
-        dataset.columns = sortedColumns.map { name in
-            let logicals = (typeMap[name] ?? []).sorted()
-            let logicalType = logicals.count <= 1
-                ? (logicals.first ?? "unknown")
-                : "mixed<\(logicals.joined(separator: " | "))>"
-            return ColumnInfo(
-                name: name,
-                logicalType: logicalType,
-                physicalType: firstPhysical[name] ?? "UNKNOWN"
-            )
-        }
-
-        return dataset
-    }
-
-    private func parsePartitionSegments(from fileURL: URL, baseFolder: URL, visit: (String, String) -> Void) {
-        let basePath = baseFolder.standardizedFileURL.path
-        let parentPath = fileURL.deletingLastPathComponent().standardizedFileURL.path
-        guard parentPath.hasPrefix(basePath) else {
-            return
-        }
-        let relative = String(parentPath.dropFirst(basePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if relative.isEmpty {
-            return
-        }
-        for segment in relative.split(separator: "/").map(String.init) {
-            guard let eq = segment.firstIndex(of: "=") else {
-                continue
-            }
-            let key = String(segment[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = String(segment[segment.index(after: eq)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty, !value.isEmpty else {
-                continue
-            }
-            visit(key, value)
-        }
-    }
-
-    private func parseFooterMetadata(_ footer: Data) -> ParsedFooter {
-        do {
-            var parser = CompactParser(data: footer)
-            return try parseFileMetadata(parser: &parser)
-        } catch {
-            return ParsedFooter(rowCount: 0, columns: [])
-        }
-    }
-
-    private func parseFileMetadata(parser: inout CompactParser) throws -> ParsedFooter {
-        var lastFieldID: Int16 = 0
-        var schema: [SchemaElement] = []
-        var fileRowCount: Int64 = 0
-        var rowGroupSum: Int64 = 0
-        var haveFileRowCount = false
-
-        while let (fieldID, fieldType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 2:
-                schema = try parseSchemaList(parser: &parser, fieldType: fieldType)
-            case 3:
-                fileRowCount = try parser.readInt64ForType(fieldType)
-                if fileRowCount < 0 { fileRowCount = 0 }
-                haveFileRowCount = true
-            case 4:
-                rowGroupSum = try parseRowGroups(parser: &parser, fieldType: fieldType)
-            default:
-                try parser.skipValue(type: fieldType)
-            }
-        }
-
-        let rowCount = haveFileRowCount ? fileRowCount : max(0, rowGroupSum)
-        let columns = leafColumns(from: schema)
-        return ParsedFooter(rowCount: rowCount, columns: columns)
-    }
-
-    private func parseSchemaList(parser: inout CompactParser, fieldType: UInt8) throws -> [SchemaElement] {
-        guard fieldType == CompactType.list.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return []
-        }
-
-        let (elementType, size) = try parser.readListHeader()
-        guard elementType == CompactType.struct.rawValue else {
-            for _ in 0..<size {
-                try parser.skipValue(type: elementType)
-            }
-            return []
-        }
-
-        var out: [SchemaElement] = []
-        out.reserveCapacity(size)
-        for _ in 0..<size {
-            out.append(try parseSchemaElement(parser: &parser))
-        }
-        return out
-    }
-
-    private func parseSchemaElement(parser: inout CompactParser) throws -> SchemaElement {
-        var lastFieldID: Int16 = 0
-        var name = ""
-        var type: Int32?
-        var convertedType: Int32?
-        var logicalType: String?
-        var numChildren = 0
-
-        while let (fieldID, fieldType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                let v = try parser.readInt64ForType(fieldType)
-                if v >= Int64(Int32.min), v <= Int64(Int32.max) {
-                    type = Int32(v)
-                }
-            case 6:
-                let v = try parser.readInt64ForType(fieldType)
-                if v >= Int64(Int32.min), v <= Int64(Int32.max) {
-                    convertedType = Int32(v)
-                }
-            case 10:
-                logicalType = try parseLogicalType(parser: &parser, fieldType: fieldType)
-            case 4:
-                guard fieldType == CompactType.binary.rawValue else {
-                    try parser.skipValue(type: fieldType)
-                    continue
-                }
-                let data = try parser.readBinaryData()
-                if let s = String(data: data, encoding: .utf8) {
-                    name = s
-                }
-            case 5:
-                let v = try parser.readInt64ForType(fieldType)
-                if v > 0 {
-                    numChildren = Int(min(v, Int64(Int.max)))
-                } else {
-                    numChildren = 0
-                }
-            default:
-                try parser.skipValue(type: fieldType)
-            }
-        }
-
-        return SchemaElement(
-            name: name,
-            type: type,
-            convertedType: convertedType,
-            logicalType: logicalType,
-            numChildren: numChildren
+            maxFiles: settings.scanAllFiles ? Int.max : settings.maxScanFiles,
+            recursive: settings.recursiveScan,
+            maxPartitionValuesPerKey: ScanLimits.maxPartitionValuesPerKey
         )
-    }
-
-    private func parseLogicalType(parser: inout CompactParser, fieldType: UInt8) throws -> String? {
-        guard fieldType == CompactType.struct.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return nil
-        }
-
-        var lastFieldID: Int16 = 0
-        var label: String?
-
-        while let (fieldID, nestedType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                label = "STRING"
-                try parser.skipValue(type: nestedType)
-            case 2:
-                label = "MAP"
-                try parser.skipValue(type: nestedType)
-            case 3:
-                label = "LIST"
-                try parser.skipValue(type: nestedType)
-            case 4:
-                label = "ENUM"
-                try parser.skipValue(type: nestedType)
-            case 5:
-                let d = try parseDecimalLogicalType(parser: &parser, fieldType: nestedType)
-                label = d ?? "DECIMAL"
-            case 6:
-                label = "DATE"
-                try parser.skipValue(type: nestedType)
-            case 7:
-                let t = try parseTimeLikeLogicalType(parser: &parser, fieldType: nestedType, name: "TIME")
-                label = t ?? "TIME"
-            case 8:
-                let t = try parseTimeLikeLogicalType(parser: &parser, fieldType: nestedType, name: "TIMESTAMP")
-                label = t ?? "TIMESTAMP"
-            case 10:
-                let i = try parseIntLogicalType(parser: &parser, fieldType: nestedType)
-                label = i ?? "INT"
-            case 11:
-                label = "UNKNOWN"
-                try parser.skipValue(type: nestedType)
-            case 12:
-                label = "JSON"
-                try parser.skipValue(type: nestedType)
-            case 13:
-                label = "BSON"
-                try parser.skipValue(type: nestedType)
-            case 14:
-                label = "UUID"
-                try parser.skipValue(type: nestedType)
-            default:
-                try parser.skipValue(type: nestedType)
-            }
-        }
-
-        return label
-    }
-
-    private func parseDecimalLogicalType(parser: inout CompactParser, fieldType: UInt8) throws -> String? {
-        guard fieldType == CompactType.struct.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return nil
-        }
-
-        var lastFieldID: Int16 = 0
-        var scale: Int64?
-        var precision: Int64?
-
-        while let (fieldID, nestedType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                scale = try parser.readInt64ForType(nestedType)
-            case 2:
-                precision = try parser.readInt64ForType(nestedType)
-            default:
-                try parser.skipValue(type: nestedType)
-            }
-        }
-
-        if let p = precision, let s = scale {
-            return "DECIMAL(\(p),\(s))"
-        }
-        return "DECIMAL"
-    }
-
-    private func parseIntLogicalType(parser: inout CompactParser, fieldType: UInt8) throws -> String? {
-        guard fieldType == CompactType.struct.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return nil
-        }
-
-        var lastFieldID: Int16 = 0
-        var bitWidth: Int64?
-        var isSigned: Bool?
-
-        while let (fieldID, nestedType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                bitWidth = try parser.readInt64ForType(nestedType)
-            case 2:
-                isSigned = try parser.readBoolForType(nestedType)
-            default:
-                try parser.skipValue(type: nestedType)
-            }
-        }
-
-        guard let bw = bitWidth else { return "INT" }
-        if let signed = isSigned {
-            return signed ? "INT\(bw)" : "UINT\(bw)"
-        }
-        return "INT\(bw)"
-    }
-
-    private func parseTimeLikeLogicalType(parser: inout CompactParser, fieldType: UInt8, name: String) throws -> String? {
-        guard fieldType == CompactType.struct.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return nil
-        }
-
-        var lastFieldID: Int16 = 0
-        var unit = "UNKNOWN"
-        var adjusted = false
-
-        while let (fieldID, nestedType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                adjusted = try parser.readBoolForType(nestedType)
-            case 2:
-                unit = try parseTimeUnit(parser: &parser, fieldType: nestedType)
-            default:
-                try parser.skipValue(type: nestedType)
-            }
-        }
-
-        return "\(name)_\(unit)\(adjusted ? "_UTC" : "")"
-    }
-
-    private func parseTimeUnit(parser: inout CompactParser, fieldType: UInt8) throws -> String {
-        guard fieldType == CompactType.struct.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return "UNKNOWN"
-        }
-
-        var lastFieldID: Int16 = 0
-        var unit = "UNKNOWN"
-
-        while let (fieldID, nestedType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            switch fieldID {
-            case 1:
-                unit = "MILLIS"
-                try parser.skipValue(type: nestedType)
-            case 2:
-                unit = "MICROS"
-                try parser.skipValue(type: nestedType)
-            case 3:
-                unit = "NANOS"
-                try parser.skipValue(type: nestedType)
-            default:
-                try parser.skipValue(type: nestedType)
-            }
-        }
-
-        return unit
-    }
-
-    private func parseRowGroups(parser: inout CompactParser, fieldType: UInt8) throws -> Int64 {
-        guard fieldType == CompactType.list.rawValue else {
-            try parser.skipValue(type: fieldType)
-            return 0
-        }
-
-        let (elementType, size) = try parser.readListHeader()
-        guard elementType == CompactType.struct.rawValue else {
-            for _ in 0..<size {
-                try parser.skipValue(type: elementType)
-            }
-            return 0
-        }
-
-        var total: Int64 = 0
-        for _ in 0..<size {
-            total += try parseRowGroup(parser: &parser)
-        }
-        return max(0, total)
-    }
-
-    private func parseRowGroup(parser: inout CompactParser) throws -> Int64 {
-        var lastFieldID: Int16 = 0
-        var rows: Int64 = 0
-
-        while let (fieldID, fieldType) = try parser.readFieldHeader(lastFieldID: &lastFieldID) {
-            if fieldID == 3 {
-                rows = max(0, try parser.readInt64ForType(fieldType))
-            } else {
-                try parser.skipValue(type: fieldType)
-            }
-        }
-
-        return rows
-    }
-
-    private func leafColumns(from schema: [SchemaElement]) -> [ColumnInfo] {
-        guard !schema.isEmpty else { return [] }
-
-        var result: [ColumnInfo] = []
-        var index = 0
-
-        func walk(path: [String]) {
-            guard index < schema.count else { return }
-            let node = schema[index]
-            index += 1
-
-            let hasName = !node.name.isEmpty
-            let nextPath = hasName ? (path + [node.name]) : path
-
-            if node.numChildren > 0 {
-                for _ in 0..<node.numChildren {
-                    walk(path: nextPath)
-                }
-            } else if hasName {
-                result.append(ColumnInfo(
-                    name: nextPath.joined(separator: "."),
-                    logicalType: parquetLogicalTypeLabel(
-                        physical: node.type,
-                        converted: node.convertedType,
-                        logical: node.logicalType
-                    ),
-                    physicalType: parquetPhysicalTypeLabel(physical: node.type)
-                ))
-            }
-        }
-
-        // Schema root is the first element.
-        let root = schema[0]
-        index = 1
-        if root.numChildren > 0 {
-            for _ in 0..<root.numChildren {
-                walk(path: [])
-            }
-        } else {
-            while index < schema.count {
-                walk(path: [])
-            }
-        }
-
-        return result
-    }
-
-    private func convertedTypeName(_ t: Int32?) -> String? {
-        guard let t else { return nil }
-        switch t {
-        case 0: return "UTF8"
-        case 1: return "MAP"
-        case 2: return "MAP_KEY_VALUE"
-        case 3: return "LIST"
-        case 5: return "ENUM"
-        case 6: return "DECIMAL"
-        case 7: return "DATE"
-        case 8: return "TIME_MILLIS"
-        case 9: return "TIME_MICROS"
-        case 10: return "TIMESTAMP_MILLIS"
-        case 11: return "TIMESTAMP_MICROS"
-        case 12: return "UINT_8"
-        case 13: return "UINT_16"
-        case 14: return "UINT_32"
-        case 15: return "UINT_64"
-        case 16: return "INT_8"
-        case 17: return "INT_16"
-        case 18: return "INT_32"
-        case 19: return "INT_64"
-        case 20: return "JSON"
-        case 21: return "BSON"
-        case 22: return "INTERVAL"
-        default: return nil
-        }
-    }
-
-    private func parquetLogicalTypeLabel(physical: Int32?, converted: Int32?, logical: String?) -> String {
-        if let logical {
-            if logical == "STRING" || logical == "UUID" || logical == "JSON" || logical == "BSON" {
-                return "string"
-            }
-            if logical == "DATE" {
-                return "date32[day]"
-            }
-            if logical.hasPrefix("TIMESTAMP_MILLIS") {
-                return "timestamp[ms]"
-            }
-            if logical.hasPrefix("TIMESTAMP_MICROS") {
-                return "timestamp[us]"
-            }
-            if logical.hasPrefix("TIMESTAMP_NANOS") {
-                return "timestamp[ns]"
-            }
-            if logical.hasPrefix("TIME_MILLIS") {
-                return "time32[ms]"
-            }
-            if logical.hasPrefix("TIME_MICROS") {
-                return "time64[us]"
-            }
-            if logical.hasPrefix("TIME_NANOS") {
-                return "time64[ns]"
-            }
-            if logical.hasPrefix("INT") || logical.hasPrefix("UINT") || logical.hasPrefix("DECIMAL") {
-                return logical.lowercased()
-            }
-        }
-
-        if let converted = convertedTypeName(converted) {
-            switch converted {
-            case "UTF8": return "string"
-            case "DATE": return "date32[day]"
-            case "TIMESTAMP_MILLIS": return "timestamp[ms]"
-            case "TIMESTAMP_MICROS": return "timestamp[us]"
-            case "TIME_MILLIS": return "time32[ms]"
-            case "TIME_MICROS": return "time64[us]"
-            case "INT_8": return "int8"
-            case "INT_16": return "int16"
-            case "INT_32": return "int32"
-            case "INT_64": return "int64"
-            case "UINT_8": return "uint8"
-            case "UINT_16": return "uint16"
-            case "UINT_32": return "uint32"
-            case "UINT_64": return "uint64"
-            case "DECIMAL": return "decimal"
-            case "JSON", "BSON": return "string"
-            default: break
-            }
-        }
-
-        switch physical {
-        case 0: return "bool"
-        case 1: return "int32"
-        case 2: return "int64"
-        case 3: return "int96"
-        case 4: return "float"
-        case 5: return "double"
-        case 6: return "binary"
-        case 7: return "binary"
-        default: return "unknown"
-        }
-    }
-
-    private func parquetPhysicalTypeLabel(physical: Int32?) -> String {
-        switch physical {
-        case 0: return "BOOLEAN"
-        case 1: return "INT32"
-        case 2: return "INT64"
-        case 3: return "INT96"
-        case 4: return "FLOAT"
-        case 5: return "DOUBLE"
-        case 6: return "BYTE_ARRAY"
-        case 7: return "FIXED_LEN_BYTE_ARRAY"
-        default: return "UNKNOWN"
-        }
     }
 
     private func formatBytes(_ value: UInt64) -> String {
@@ -969,8 +204,12 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         let root = ColumnTreeNode()
 
         for col in columns {
-            let parts = col.name.split(separator: ".").map(String.init)
+            var parts = col.name.split(separator: ".").map(String.init)
             if parts.isEmpty { continue }
+            if parts.count > ParquetParserBounds.maxDepth {
+                let tail = parts[(ParquetParserBounds.maxDepth - 1)...].joined(separator: ".")
+                parts = Array(parts[..<(ParquetParserBounds.maxDepth - 1)]) + [tail]
+            }
 
             var node = root
             var idx = 0
@@ -1059,8 +298,152 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         return out
     }
 
+    private func schemaExportScheme(for format: SchemaExportFormat) -> SchemaExportScheme {
+        switch format {
+        case .arrowJSONV1:
+            return SchemaExportScheme(
+                id: format.rawValue,
+                version: 1,
+                title: "Parquet Quick Look Arrow-Friendly Schema JSON",
+                description: "Nested and flat schema export with Arrow-friendly logical types plus R/Python snippet stubs."
+            )
+        }
+    }
+
+    private func buildSchemaExportPayload(format: SchemaExportFormat, path: String, columns: [ColumnInfo], rowCount: Int64) -> SchemaExportPayload {
+        let fields = buildExportFields(columns: columns)
+        let flat = columns.map {
+            ExportFlatField(path: $0.name, type: $0.logicalType, physicalType: $0.physicalType)
+        }
+        return SchemaExportPayload(
+            format: format.rawValue,
+            sourcePath: path,
+            rowCount: rowCount,
+            columnCount: columns.count,
+            fields: fields,
+            flatFields: flat,
+            pythonSnippet: pythonSchemaSnippet(columns: columns),
+            rSnippet: rSchemaSnippet(columns: columns)
+        )
+    }
+
+    private func schemaExportBase64(path: String, columns: [ColumnInfo], rowCount: Int64, format: SchemaExportFormat = .arrowJSONV1) -> String {
+        let envelope = SchemaExportEnvelope(
+            scheme: schemaExportScheme(for: format),
+            payload: buildSchemaExportPayload(format: format, path: path, columns: columns, rowCount: rowCount)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = (try? encoder.encode(envelope)) ?? Data("{}".utf8)
+        return data.base64EncodedString()
+    }
+
+    private func buildExportFields(columns: [ColumnInfo]) -> [ExportField] {
+        let root = ColumnTreeNode()
+        for col in columns {
+            let parts = col.name.split(separator: ".").map(String.init)
+            guard !parts.isEmpty else { continue }
+            var node = root
+            for (idx, p) in parts.enumerated() {
+                node = node.child(named: p)
+                if idx == parts.count - 1 {
+                    node.type = col.logicalType
+                } else if node.groupType == nil {
+                    node.groupType = "struct"
+                }
+            }
+        }
+
+        func walk(node: ColumnTreeNode) -> [ExportField] {
+            var out: [ExportField] = []
+            for name in node.order {
+                guard let child = node.children[name] else { continue }
+                let children = walk(node: child)
+                let t = children.isEmpty ? (child.type ?? "unknown") : (child.groupType ?? "struct")
+                out.append(ExportField(name: name, type: t, children: children))
+            }
+            return out
+        }
+
+        return walk(node: root)
+    }
+
+    private func pythonTypeExpr(_ logical: String) -> String {
+        let t = logical.lowercased()
+        if t.hasPrefix("string") { return "pa.string()" }
+        if t == "bool" || t == "boolean" { return "pa.bool_()" }
+        if t == "int8" { return "pa.int8()" }
+        if t == "int16" { return "pa.int16()" }
+        if t == "int32" { return "pa.int32()" }
+        if t == "int64" { return "pa.int64()" }
+        if t == "uint8" { return "pa.uint8()" }
+        if t == "uint16" { return "pa.uint16()" }
+        if t == "uint32" { return "pa.uint32()" }
+        if t == "uint64" { return "pa.uint64()" }
+        if t == "float" { return "pa.float32()" }
+        if t == "double" { return "pa.float64()" }
+        if t == "date32[day]" { return "pa.date32()" }
+        if t == "timestamp[ms]" { return "pa.timestamp('ms')" }
+        if t == "timestamp[us]" { return "pa.timestamp('us')" }
+        if t == "timestamp[ns]" { return "pa.timestamp('ns')" }
+        if t == "time32[ms]" { return "pa.time32('ms')" }
+        if t == "time64[us]" { return "pa.time64('us')" }
+        if t == "time64[ns]" { return "pa.time64('ns')" }
+        return "pa.string()  # fallback from \(logical)"
+    }
+
+    private func rTypeExpr(_ logical: String) -> String {
+        let t = logical.lowercased()
+        if t.hasPrefix("string") { return "arrow::utf8()" }
+        if t == "bool" || t == "boolean" { return "arrow::boolean()" }
+        if t == "int8" { return "arrow::int8()" }
+        if t == "int16" { return "arrow::int16()" }
+        if t == "int32" { return "arrow::int32()" }
+        if t == "int64" { return "arrow::int64()" }
+        if t == "uint8" { return "arrow::uint8()" }
+        if t == "uint16" { return "arrow::uint16()" }
+        if t == "uint32" { return "arrow::uint32()" }
+        if t == "uint64" { return "arrow::uint64()" }
+        if t == "float" { return "arrow::float32()" }
+        if t == "double" { return "arrow::float64()" }
+        if t == "date32[day]" { return "arrow::date32()" }
+        if t == "timestamp[ms]" { return "arrow::timestamp(\"ms\")" }
+        if t == "timestamp[us]" { return "arrow::timestamp(\"us\")" }
+        if t == "timestamp[ns]" { return "arrow::timestamp(\"ns\")" }
+        if t == "time32[ms]" { return "arrow::time32(\"ms\")" }
+        if t == "time64[us]" { return "arrow::time64(\"us\")" }
+        if t == "time64[ns]" { return "arrow::time64(\"ns\")" }
+        return "arrow::utf8()  # fallback from \(logical)"
+    }
+
+    private func pythonSchemaSnippet(columns: [ColumnInfo]) -> String {
+        var lines: [String] = [
+            "import pyarrow as pa",
+            "",
+            "schema = pa.schema(["
+        ]
+        for col in columns {
+            lines.append("    pa.field(\"\(col.name)\", \(pythonTypeExpr(col.logicalType))),")
+        }
+        lines.append("])")
+        return lines.joined(separator: "\n")
+    }
+
+    private func rSchemaSnippet(columns: [ColumnInfo]) -> String {
+        var lines: [String] = [
+            "schema <- arrow::schema(",
+        ]
+        for (idx, col) in columns.enumerated() {
+            let comma = idx == columns.count - 1 ? "" : ","
+            lines.append("  arrow::field(\"\(col.name)\", \(rTypeExpr(col.logicalType)))\(comma)")
+        }
+        lines.append(")")
+        return lines.joined(separator: "\n")
+    }
+
     private func renderHTML(path: String, metadata: Metadata) -> String {
         let settings = loadSettings()
+        let exportSchemaB64 = schemaExportBase64(path: path, columns: metadata.columns, rowCount: metadata.rowCount)
         let showCount = settings.showAllColumns
             ? metadata.columns.count
             : min(metadata.columns.count, max(1, settings.maxColumns))
@@ -1109,8 +492,55 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             .toggle{width:16px;height:16px;border:none;border-radius:3px;background:transparent;color:#475569;font-size:13px;line-height:14px;cursor:pointer;margin-right:6px;padding:0;vertical-align:middle}
             .toggle:hover{background:#e5e7eb;color:#111827}
             .spacer{display:inline-block;width:18px;margin-right:6px}
+            .toolbar{margin:12px 0 10px}
+            .export-pane{display:none;margin:10px 0;border:1px solid #d1d5db;border-radius:8px;padding:10px;background:#f8fafc}
+            .export-pane textarea{width:100%;height:220px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;font-size:11px;border:1px solid #cbd5e1;border-radius:6px;padding:8px;resize:vertical}
+            .export-actions{margin-top:8px;display:flex;gap:8px}
+            .sub-btn{border:1px solid #cbd5e1;background:#fff;color:#111827;border-radius:6px;padding:5px 8px;font-size:11px;cursor:pointer}
+            .sub-btn:hover{background:#f3f4f6}
+            h2{font-size:15px;margin:22px 0 8px}
+            details{margin:10px 0}
+            summary{cursor:pointer;font-weight:600;padding:4px 0}
+            table.facts th{width:140px;background:transparent}
+            code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;word-break:break-all}
           </style>
           <script>
+            function schemaBytes(){
+              const b64 = "\(exportSchemaB64)";
+              const bytes = atob(b64);
+              const arr = new Uint8Array(bytes.length);
+              for(let i=0;i<bytes.length;i++){ arr[i] = bytes.charCodeAt(i); }
+              return arr;
+            }
+            function schemaJson(){
+              try {
+                const arr = schemaBytes();
+                return new TextDecoder("utf-8").decode(arr);
+              } catch (e) {
+                return "";
+              }
+            }
+            function showSchemaPane(){
+              const pane = document.getElementById("export-pane");
+              const area = document.getElementById("export-json");
+              const btn = document.getElementById("json-btn");
+              if(!pane || !area){ return; }
+              if(pane.style.display === "block"){
+                pane.style.display = "none";
+                if(btn){ btn.textContent = "Show JSON"; }
+                return;
+              }
+              area.value = schemaJson();
+              pane.style.display = "block";
+              if(btn){ btn.textContent = "Hide JSON"; }
+            }
+            function copySchema(){
+              const area = document.getElementById("export-json");
+              if(!area){ return; }
+              area.focus();
+              area.select();
+              document.execCommand("copy");
+            }
             function childRows(id){
               return Array.from(document.querySelectorAll('tr[data-parent="' + id + '"]'));
             }
@@ -1157,8 +587,18 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
           </script>
         </head>
         <body>
-          <h1>Parquet Quick Look</h1>
+          <h1>Parquet Quick Look\(esc(PreviewProvider.versionSuffix))</h1>
           <div class=\"muted\">\(esc(path))</div>
+          <div class=\"toolbar\">
+            <button id=\"json-btn\" class=\"sub-btn\" onclick=\"showSchemaPane();return false;\">Show JSON</button>
+          </div>
+          <div id=\"export-pane\" class=\"export-pane\">
+            <div class=\"muted\" style=\"margin-bottom:6px\">If download is blocked by Quick Look, copy the schema JSON from here.</div>
+            <textarea id=\"export-json\" spellcheck=\"false\"></textarea>
+            <div class=\"export-actions\">
+              <button class=\"sub-btn\" onclick=\"copySchema();return false;\">Copy JSON</button>
+            </div>
+          </div>
 
           <div class=\"meta\">
             <div class=\"card\"><div class=\"label\">Valid</div><div class=\"val\">\(metadata.valid ? "Yes" : "No")</div></div>
@@ -1172,12 +612,81 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             <thead><tr><th>#</th><th>Column</th><th>Type</th></tr></thead>
             <tbody>\(rows)</tbody>
           </table>
+          \(footerDetailsHTML(metadata))
         </body>
         </html>
         """
     }
 
+    // Writer, storage per column, row groups and key/value metadata; all from the footer.
+    private func footerDetailsHTML(_ m: Metadata) -> String {
+        guard m.valid else { return "" }
+        func bytes(_ v: Int64) -> String { esc(formatBytes(UInt64(max(0, v)))) }
+        // UTC date, plus the time when it is not midnight.
+        func day(_ d: Date) -> String {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone(identifier: "UTC")
+            f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let s = f.string(from: d)
+            return esc(s.hasSuffix(" 00:00:00") ? String(s.dropLast(9)) : s)
+        }
+
+        let compressed = m.columns.reduce(Int64(0)) { ParquetParserBounds.saturatingAdd($0, $1.compressedSize) }
+        let uncompressed = m.columns.reduce(Int64(0)) { ParquetParserBounds.saturatingAdd($0, $1.uncompressedSize) }
+        var facts = "<tr><th>Writer</th><td>\(esc(m.createdBy ?? "—"))</td></tr>"
+        facts += "<tr><th>Row groups</th><td>\(esc(formatInt(Int64(m.rowGroupCount))))</td></tr>"
+        if uncompressed > 0 {
+            let ratio = String(format: "%.1f×", Double(uncompressed) / Double(max(1, compressed)))
+            facts += "<tr><th>Data size</th><td>\(bytes(compressed)) compressed, \(bytes(uncompressed)) uncompressed (\(ratio))</td></tr>"
+        }
+        if let range = m.dateRange {
+            facts += "<tr><th>Date range</th><td>\(day(range.min)) – \(day(range.max)) <span class=\"muted\">(column statistics, UTC)</span></td></tr>"
+        }
+        var html = "<h2>Footer details</h2><table class=\"facts\">\(facts)</table>"
+
+        if m.columns.contains(where: { !$0.codecs.isEmpty }) {
+            var rows = ""
+            for c in m.columns {
+                let range = c.minDate.flatMap { lo in c.maxDate.map { "\(day(lo)) – \(day($0))" } } ?? ""
+                rows += "<tr><td>\(esc(c.name))</td><td>\(esc(c.codecs.joined(separator: ", ")))</td><td>\(bytes(c.compressedSize))</td><td>\(bytes(c.uncompressedSize))</td><td>\(range)</td></tr>"
+            }
+            html += "<details><summary>Storage per column</summary><table><thead><tr><th>Column</th><th>Codec</th><th>Compressed</th><th>Uncompressed</th><th>Date range</th></tr></thead><tbody>\(rows)</tbody></table></details>"
+        }
+
+        if !m.rowGroups.isEmpty {
+            var rows = ""
+            for (i, g) in m.rowGroups.enumerated() {
+                rows += "<tr><td>\(i + 1)</td><td>\(esc(formatInt(g.rows)))</td><td>\(bytes(g.compressedSize))</td><td>\(bytes(g.totalByteSize))</td></tr>"
+            }
+            let more = m.rowGroupCount - m.rowGroups.count
+            if more > 0 {
+                rows += "<tr><td colspan=\"4\" class=\"muted\">+ \(more) more row groups</td></tr>"
+            }
+            html += "<details><summary>Row groups (\(m.rowGroupCount))</summary><table><thead><tr><th>#</th><th>Rows</th><th>Compressed</th><th>Uncompressed</th></tr></thead><tbody>\(rows)</tbody></table></details>"
+        }
+
+        if !m.keyValueMetadata.isEmpty {
+            var rows = ""
+            for kv in m.keyValueMetadata {
+                let value: String
+                if kv.key == "ARROW:schema" {
+                    value = "<span class=\"muted\">Arrow schema, \(kv.valueLength) bytes (see Show JSON)</span>"
+                } else if let v = kv.value {
+                    let short = v.count > 300 ? String(v.prefix(300)) + "…" : v
+                    value = "<code>\(esc(short))</code>" + (kv.valueLength > 300 ? " <span class=\"muted\">(\(kv.valueLength) bytes)</span>" : "")
+                } else {
+                    value = "<span class=\"muted\">no value</span>"
+                }
+                rows += "<tr><td>\(esc(kv.key))</td><td>\(value)</td></tr>"
+            }
+            html += "<details><summary>Key/value metadata (\(m.keyValueMetadata.count))</summary><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>\(rows)</tbody></table></details>"
+        }
+        return html
+    }
+
     private func renderDatasetHTML(path: String, dataset: DatasetMetadata, settings: PreviewSettings) -> String {
+        let exportSchemaB64 = schemaExportBase64(path: path, columns: dataset.columns, rowCount: dataset.totalRows)
         let showCount = settings.showAllColumns
             ? dataset.columns.count
             : min(dataset.columns.count, max(1, settings.maxColumns))
@@ -1243,8 +752,50 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             .toggle{width:16px;height:16px;border:none;border-radius:3px;background:transparent;color:#475569;font-size:13px;line-height:14px;cursor:pointer;margin-right:6px;padding:0;vertical-align:middle}
             .toggle:hover{background:#e5e7eb;color:#111827}
             .spacer{display:inline-block;width:18px;margin-right:6px}
+            .toolbar{margin:12px 0 10px}
+            .export-pane{display:none;margin:10px 0;border:1px solid #d1d5db;border-radius:8px;padding:10px;background:#f8fafc}
+            .export-pane textarea{width:100%;height:220px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,monospace;font-size:11px;border:1px solid #cbd5e1;border-radius:6px;padding:8px;resize:vertical}
+            .export-actions{margin-top:8px;display:flex;gap:8px}
+            .sub-btn{border:1px solid #cbd5e1;background:#fff;color:#111827;border-radius:6px;padding:5px 8px;font-size:11px;cursor:pointer}
+            .sub-btn:hover{background:#f3f4f6}
           </style>
           <script>
+            function schemaBytes(){
+              const b64 = "\(exportSchemaB64)";
+              const bytes = atob(b64);
+              const arr = new Uint8Array(bytes.length);
+              for(let i=0;i<bytes.length;i++){ arr[i] = bytes.charCodeAt(i); }
+              return arr;
+            }
+            function schemaJson(){
+              try {
+                const arr = schemaBytes();
+                return new TextDecoder("utf-8").decode(arr);
+              } catch (e) {
+                return "";
+              }
+            }
+            function showSchemaPane(){
+              const pane = document.getElementById("export-pane");
+              const area = document.getElementById("export-json");
+              const btn = document.getElementById("json-btn");
+              if(!pane || !area){ return; }
+              if(pane.style.display === "block"){
+                pane.style.display = "none";
+                if(btn){ btn.textContent = "Show JSON"; }
+                return;
+              }
+              area.value = schemaJson();
+              pane.style.display = "block";
+              if(btn){ btn.textContent = "Hide JSON"; }
+            }
+            function copySchema(){
+              const area = document.getElementById("export-json");
+              if(!area){ return; }
+              area.focus();
+              area.select();
+              document.execCommand("copy");
+            }
             function childRows(id){
               return Array.from(document.querySelectorAll('tr[data-parent="' + id + '"]'));
             }
@@ -1288,8 +839,18 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
           </script>
         </head>
         <body>
-          <h1>Parquet Dataset Quick Look</h1>
+          <h1>Parquet Dataset Quick Look\(esc(PreviewProvider.versionSuffix))</h1>
           <div class=\"muted\">\(esc(path))</div>
+          <div class=\"toolbar\">
+            <button id=\"json-btn\" class=\"sub-btn\" onclick=\"showSchemaPane();return false;\">Show JSON</button>
+          </div>
+          <div id=\"export-pane\" class=\"export-pane\">
+            <div class=\"muted\" style=\"margin-bottom:6px\">If download is blocked by Quick Look, copy the schema JSON from here.</div>
+            <textarea id=\"export-json\" spellcheck=\"false\"></textarea>
+            <div class=\"export-actions\">
+              <button class=\"sub-btn\" onclick=\"copySchema();return false;\">Copy JSON</button>
+            </div>
+          </div>
 
           <div class=\"meta\">
             <div class=\"card\"><div class=\"label\">Parquet Files</div><div class=\"val\">\(esc(formatInt(Int64(dataset.fileCount))))</div></div>

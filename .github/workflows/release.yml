@@ -13,19 +13,43 @@ jobs:
 
     steps:
       - name: Checkout release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      # The app's full version (ParquetReleaseVersion, else CFBundleShortVersionString) must
+      # match the tag, and a pre-release tag (vX.Y.Z-beta.N) must be a GitHub pre-release and
+      # vice versa; the in-app updater relies on both.
+      - name: Check tag against app version
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          PLIST=preview/app/Info.plist
+          APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :ParquetReleaseVersion' "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")"
+          if [[ "${TAG#v}" != "$APP_VERSION" ]]; then
+            echo "::error::tag $TAG does not match the app version $APP_VERSION"
+            exit 1
+          fi
+          if [[ "$TAG" == *-* && "$PRERELEASE" != "true" ]] || [[ "$TAG" != *-* && "$PRERELEASE" == "true" ]]; then
+            echo "::error::tag $TAG and the GitHub pre-release flag ($PRERELEASE) disagree"
+            exit 1
+          fi
 
       - name: Build bundles
         run: ./scripts/build.sh
 
       - name: Package DMG/ZIP/SHA256
         shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
 
-          TAG="${{ github.event.release.tag_name }}"
           VERSION="${TAG#v}"
 
           ROOT_DIR="$PWD"
@@ -63,12 +87,35 @@ jobs:
             echo "SHA_PATH=$SHA_PATH"
           } >> "$GITHUB_ENV"
 
+      # Ed25519 signature over the ZIP for the app's in-app updater (scripts/sign_update.swift).
+      # Without the secret the release still builds, but the app only offers the release page.
+      - name: Sign ZIP for in-app updates
+        shell: bash
+        env:
+          PARQUET_UPDATE_SIGNING_KEY: ${{ secrets.PARQUET_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PARQUET_UPDATE_SIGNING_KEY" ]]; then
+            echo "::warning::PARQUET_UPDATE_SIGNING_KEY is not set; publishing without an update signature."
+            exit 0
+          fi
+          swift scripts/sign_update.swift sign "$ZIP_PATH"
+          echo "SIG_PATH=$ZIP_PATH.sig" >> "$GITHUB_ENV"
+
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
             ${{ env.DMG_PATH }}
             ${{ env.ZIP_PATH }}
             ${{ env.SHA_PATH }}
+          fail_on_unmatched_files: true
+
+      - name: Upload update signature
+        if: env.SIG_PATH != ''
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: ${{ env.SIG_PATH }}
           fail_on_unmatched_files: true

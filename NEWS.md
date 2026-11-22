@@ -1,5 +1,85 @@
 # News
 
+## 0.7.1 - 2026-10-24
+
+First stable release since 0.6.0; includes 0.7.0-beta.1 and 0.7.1-beta.1.
+
+### Changes
+
+- Beta channel: `Updates` → `Release channel` → `Beta` also offers pre-releases; `Stable` (default) offers only regular releases.
+- `Updates` → `Downgrade to Stable…` (shown on beta builds) goes back to the newest stable release: signed download, channel set to Stable, Spotlight importer replaced.
+- `.parquet` files are now a registered file type ("Apache Parquet File"), and folders named `*.parquet_ds` are recognised as "Parquet Database".
+- Spotlight finds files by the date range of their data, from the footer statistics: e.g. files with data from 2024: `mdfind 'com_rkrug_parquet_date_max >= $time.iso(2024-01-01) && com_rkrug_parquet_date_min < $time.iso(2025-01-01)'`.
+- Spotlight indexes the writer (`kMDItemCreator`, e.g. DuckDB, Spark, Arrow) and the names of the footer's key/value metadata.
+- Quick Look shows footer details: writer, row groups, compression per column, date range and key/value metadata.
+- Spotlight indexes column types, e.g. `mdfind 'com_rkrug_parquet_column_types == "*:timestamp*"'`.
+
+## 0.7.1-beta.1 - 2026-10-24 (pre-release)
+
+### Changes
+
+- `Updates` → `Downgrade to Stable…` (shown on beta builds) goes back to the newest stable release: signed download, channel set to Stable, Spotlight importer replaced.
+
+## 0.7.0-beta.1 - 2026-10-24 (pre-release)
+
+### Changes
+
+- Beta channel: `Updates` → `Release channel` → `Beta` also offers pre-releases. This is the first one.
+- `.parquet` files are now a registered file type ("Apache Parquet File"), and folders named `*.parquet_ds` are recognised as "Parquet Database".
+- Spotlight finds files by the date range of their data, from the footer statistics: e.g. files with data from 2024: `mdfind 'com_rkrug_parquet_date_max >= $time.iso(2024-01-01) && com_rkrug_parquet_date_min < $time.iso(2025-01-01)'`.
+- Spotlight indexes the writer (`kMDItemCreator`, e.g. DuckDB, Spark, Arrow) and the names of the footer's key/value metadata.
+- Quick Look shows footer details: writer, row groups, compression per column, date range and key/value metadata.
+- Spotlight indexes column types, e.g. `mdfind 'com_rkrug_parquet_column_types == "*:timestamp*"'`.
+
+## 0.6.0 - 2026-10-24
+
+### Enhancements
+
+- Updates can be installed from within the app (`Install Update`), with a signature check before anything is replaced.
+
+## 0.5.1 - 2026-10-24
+
+### Changes
+
+- Updating is now just replacing the app: on launch it replaces an older Spotlight importer automatically. (Installing 0.5.0 or an older version still needs `Re-Install` once.)
+
+## 0.5.0 - 2026-10-24
+
+### Bug Fixes
+
+- Spotlight now indexes correct row counts and the full list of column names. Quick Look and Spotlight share one footer parser, checked against Apache Arrow in the test suite.
+- The app and Quick Look extension now run on macOS 13 and later on both Apple silicon and Intel Macs. 0.4.3 builds only ran on macOS 26 with Apple silicon.
+- `install.sh` and `uninstall.sh` now handle apps installed from the DMG into `/Applications`, and uninstall no longer stops on the protected settings container.
+
+### Changes
+
+- Spotlight now indexes hive partitions (`key=value` folders), e.g. `mdfind 'com_rkrug_parquet_partitions == "year=2024"'`.
+- Minimum macOS is now 13.0 (Ventura).
+- The manager app shows its version in the sidebar.
+- Updated Gatekeeper instructions for macOS 15 and later.
+
+## 0.4.3 - 2026-10-24
+
+### Enhancements
+
+- Added `Export Schema (JSON)` button in Quick Look (file and dataset previews).
+- Export now provides Arrow-friendly schema JSON with nested/flat views and reusable snippet stubs for R and Python.
+- Export JSON is now wrapped in a saved, versioned scheme envelope (`parquet-quicklook-arrow-schema-v1`) to allow adding additional export schemes later without breaking compatibility.
+- Quick Look previews now show the version in the heading, e.g. `Parquet Quick Look (v0.4.3)`.
+- `Show JSON` now toggles the export pane (`Hide JSON` closes it again).
+
+### Security
+
+- Hardened Quick Look footer parsing so malformed metadata is rejected instead of exhausting the preview process.
+- Quick Look no longer reads footers larger than 16 MiB; such files are still shown as valid Parquet files, without columns (same limit as the Spotlight importer).
+- Dataset folder totals now saturate instead of wrapping.
+- Uninstall hands the app bundle path to the shell as an argument rather than interpolating it into a command string.
+- Spotlight column extraction skips oversize footers and caps the number of indexed columns. Files beyond those limits are still indexed as Parquet files.
+
+### Testing
+
+- Added sanity-bounds checks for importer limits, parse helpers, uninstall argument construction, and release-workflow pinning.
+
 ## 0.4.2 - 2026-03-12
 
 ### Bug Fixes

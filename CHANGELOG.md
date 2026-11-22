@@ -2,6 +2,84 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.7.1 - 2026-10-24
+
+- Stable release of 0.7.1-beta.1 (and 0.7.0-beta.1); bumped importer, app, and extension builds to `15`, `ParquetReleaseVersion` is `0.7.1`.
+
+## 0.7.1-beta.1 - 2026-10-24 (pre-release)
+
+- Bumped importer, app, and extension versions to `0.7.1` (build 14); the app's `ParquetReleaseVersion` is `0.7.1-beta.1`.
+- `Downgrade to Stable…` in Updates on pre-release builds (#31): installs the newest stable release older than the running beta (`ParquetReleaseSelector.downgradeTarget`) through the signed update flow, sets the channel to Stable, and removes the installed Spotlight importer before the swap so the older app installs its own on launch. Without a signed download it opens the release page. The release-list request moved into `fetchReleases`, shared by update checks and the downgrade.
+
+## 0.7.0-beta.1 - 2026-10-24 (pre-release)
+
+- Bumped importer, app, and extension versions to `0.7.0` (build 13); the app's `ParquetReleaseVersion` is `0.7.0-beta.1`.
+- Beta channel (#30): `ParquetSemVer` parses and orders SemVer pre-releases (`0.7.0-beta.1 < 0.7.0`); `ParquetReleaseSelector` picks the newest release per channel (Stable skips pre-releases and drafts); the update check reads `/releases` instead of `/releases/latest`; `Release channel` picker (Stable/Beta) in the Updates settings, saved on change; update dialog marks betas. `release.sh` accepts pre-release tags from `dev` and creates GitHub pre-releases; the release workflow checks the tag against the app version and the pre-release flag.
+- The app declares the file types: `.parquet` as `com.rkrug.parquet` ("Apache Parquet File"; previously macOS only knew a dynamic type) and folders named `*.parquet_ds` as `com.rkrug.parquet-database` ("Parquet Database", a normal folder). Quick Look supports the database type. The importer now imports the `.parquet` declaration instead of exporting it.
+- Spotlight indexes column types as `com_rkrug_parquet_column_types` (`name:type`, e.g. `ts:timestamp[us]`).
+- Footer parser reads `created_by`, key/value metadata, and per row group the column chunks (codec, compressed/uncompressed size, statistics), keeping per-column totals, the first 200 row groups, 256 metadata entries and values up to 4 KiB (`ParquetParserBounds`). `parse(footer:)` now returns a `Summary`.
+- Spotlight: `kMDItemCreator` from `created_by` (#15), `com_rkrug_parquet_metadata_keys` and `meta-<key>` keywords (#15), and `com_rkrug_parquet_date_min` / `_date_max` (`CFDate`) over all date/timestamp columns from `min_value`/`max_value` statistics, falling back to legacy `min`/`max` (valid for signed INT32/INT64); timestamps are read as UTC (#18).
+- Importer bridge: `parquet_copy_attributes` returns the full attribute dictionary built in Swift; `MetadataImporter.c` only copies it (replaces `parquet_read_summary` / `parquet_read_partitions`).
+- Quick Look: footer details section with writer, row-group count, data size and compression ratio, date range, storage per column (codec, sizes, date range), row-group table and key/value metadata (#19).
+- New fixture `footer.parquet` (3 row groups, ZSTD/SNAPPY, `owner` metadata, date/ms/ns timestamp ranges) with core and importer tests.
+- Core tests corrupt the fixture footers (bit flips, truncation, `0xff` runs, random length fields, random bytes; 3000 seeded cases, `PARQUET_FUZZ_SEED` / `PARQUET_FUZZ_CASES` to override) and check `ParquetFooter.parse` / `read` for no trap, no hang (< 1 s per case), and the column bound (#16).
+- CI: a `compat` job runs the build and tests natively on `macos-15-intel` and `macos-15`, the oldest hosted macOS now that macOS 13/14 runners are retired (#17).
+
+## 0.6.0 - 2026-10-24
+
+- Bumped importer, app, and extension versions to `0.6.0`.
+- In-app updates: `Install Update` in the update dialog downloads the release ZIP, verifies an Ed25519 signature (CryptoKit; public key `ParquetUpdatePublicKey` in the app's Info.plist), checks bundle ID, version and code signature, then swaps the app via a helper after quit and relaunches. Falls back to the release page when the release is unsigned, the app folder is not writable, or a check fails.
+- Release workflow signs the ZIP with the `PARQUET_UPDATE_SIGNING_KEY` secret (`scripts/sign_update.swift`) and uploads `<zip>.sig`; without the secret it warns and publishes unsigned.
+
+## 0.5.1 - 2026-10-24
+
+- Bumped importer, app, and extension versions to `0.5.1`.
+- The manager app now updates an older Spotlight importer in `~/Library/Spotlight` on launch (compares `CFBundleShortVersionString`, then `CFBundleVersion`; never downgrades), so updating is just replacing the app. Previously the importer was only installed when missing, and replacing the app left the old importer in place.
+- README: update procedure; rollback needs `Re-Install`.
+
+## 0.5.0 - 2026-10-24
+
+- Bumped importer, app, and extension versions to `0.5.0`.
+- Moved the folder/dataset summary (file and row totals, column union, hive partition values) from the Quick Look extension to `Sources/ParquetCore/ParquetDataset.swift`, with tests on a generated hive-partitioned dataset.
+- Spotlight indexes hive partitions from the file's folder path as `com_rkrug_parquet_partitions` (`key=value`, percent-decoded, up to 32) and `part-<key>-<value>` keywords. Quick Look's folder preview uses the same partition parser (values are now percent-decoded there too).
+- Manager window: content now shares the window toolbar, so the first section header is no longer blurred.
+
+- One footer parser for Quick Look and Spotlight: the Thrift compact-protocol parser moved from `PreviewProvider.swift` to `Sources/ParquetCore/ParquetFooterParser.swift`. The importer is now a thin C CFPlugIn shell (`src/MetadataImporter.c`) calling it through `src/ImporterBridge.swift`.
+  - Fixes Spotlight values: the old C importer searched for Thrift *binary*-protocol markers, so row counts were usually 0 and column names came from an ASCII heuristic (capped at 128, with stray tokens such as `duckdb_schema`). It now stores the footer's row count and leaf column paths (nested fields joined with `.`).
+  - Files whose declared footer does not fit in the file are now indexed as invalid, matching Quick Look.
+  - Removed `src/ParquetBounds.h` and its test; limits live in `ParquetParserBounds`.
+- Added Arrow-generated fixtures (`Tests/fixtures`, `make_fixtures.R`) and tests that check both the Swift parser and the importer's C entry point against Arrow's row and column counts.
+
+- Build universal binaries (arm64 + x86_64) with an explicit macOS 13.0 deployment target. Previous builds silently required the build host's macOS (26 for 0.4.3) and Apple silicon.
+- Raised the documented and declared minimum macOS from 12.0 to 13.0; the manager app's SwiftUI layout requires macOS 13.
+- `install.sh` updates an existing `/Applications` install in place instead of adding a second copy in `~/Applications`.
+- `uninstall.sh` treats the protected container removal as best effort and also removes the `/Applications` copy.
+- Manager app shows its version in the sidebar.
+- README: updated Gatekeeper instructions for macOS 15+.
+- CI: pinned `actions/checkout` to a full commit SHA and stopped persisting checkout credentials.
+
+## 0.4.3 - 2026-10-24
+
+- Added `Export Schema (JSON)` button in Quick Look previews (file and dataset views).
+- Added Arrow-friendly schema export payload:
+  - nested schema tree
+  - flat field map with logical/physical types
+  - reusable R and Python Arrow snippet stubs.
+- Added a versioned schema-export envelope (`parquet-quicklook-arrow-schema-v1`) so additional export schemes can be added later in a compatible way.
+- Quick Look headings now show the installed version (`Parquet Quick Look (vX.Y.Z)`, `Parquet Dataset Quick Look (vX.Y.Z)`).
+- The `Show JSON` button now toggles the export pane and reads `Hide JSON` while it is open.
+- Hardened Quick Look footer parsing against malformed metadata:
+  - bound nesting depth and declared container sizes by remaining input
+  - overflow-checked field ids, binary lengths, and row-group sums
+  - cap total skip work so parse cost stays linear in the footer size
+  - skip reading footers larger than 16 MiB (file is still shown as valid Parquet, without columns), matching the importer
+- Use saturating sums for Quick Look dataset size and row totals.
+- Pass the app bundle path to the uninstall shell as a positional argument.
+- Bound Spotlight importer footer reads (16 MiB) and column extraction (4096).
+- Harden the release workflow: pin actions to full commit SHAs, pass the tag via the environment, and do not persist checkout credentials.
+- Added sanity-bounds tests for importer footer limits, parser count/total helpers, uninstall argument construction, and release-workflow pinning (any full commit SHA is accepted).
+- Bumped importer, app, and extension versions to `0.4.3`.
+
 ## 0.4.2 - 2026-03-12
 
 - Fixed GitHub Release Assets workflow shell compatibility:
