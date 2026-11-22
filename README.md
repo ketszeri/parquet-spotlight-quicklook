@@ -4,26 +4,26 @@
 > **This repository is written with an AI coding agent: [Claude Code](https://claude.com/claude-code) (Anthropic, Claude Opus 5.5).**
 > It works for me, but I take no guarantee if it works for you.
 
-This README describes the current stable release, **0.7.1**. Pre-releases with newer features are available on the [beta channel](#beta-channel-070-beta1-onwards).
+This README on `dev` describes the current development state (0.8.0 beta). The README on [`main`](https://github.com/rkrug/parquet-spotlight-quicklook) describes the stable release.
 
 This project provides:
 
 - a macOS Spotlight importer (`.mdimporter`) that indexes Parquet footer metadata: validity, sizes, row and column counts, column names and types, hive partitions, the writer (`created_by`), footer key/value metadata keys, and the date range of date/timestamp columns (from the column statistics)
 - a modern Quick Look preview extension (`.appex`, embedded in a host app) with:
-  - hierarchical schema tree (collapsible groups), the full column list, Arrow-style logical type labels
-  - footer details: writer, row groups, compressed/uncompressed sizes, codec and date range per column, key/value metadata
+  - `Schema` tab: hierarchical schema tree (collapsible groups), the full column list, Arrow-style logical type labels, and footer details (writer, row groups, sizes, codec and date range per column, key/value metadata)
+  - `Data` tab: the first rows (100 by default, up to 10,000), nested values (lists, structs, maps) that open as a tree on click; all common codecs and encodings
   - `Show JSON` / `Copy JSON`: the schema as Arrow-friendly JSON for reuse in R/Python, in a versioned envelope (`parquet-quicklook-arrow-schema-v1`)
-  - dataset folders (and `*.parquet_ds` folders): file and row totals, merged schema, hive partition values
+  - dataset folders (and `*.parquet_ds` folders): file and row totals, merged schema, hive partition values, and the first rows across the files
 - a small GUI manager app (`Parquet Quick Look and Index.app`) with:
   - `Re-Install`, `Repair Registration`, and `Uninstall` actions
   - `Copy Diagnostic Report` action for support/issue reports (anonymized)
-  - Quick Look rendering settings (schema display + dataset scan controls)
-  - `Updates` tab: automatic checks (`Daily`/`Weekly`/`Monthly`), in-app install of signed updates, `Stable`/`Beta` release channel, `Downgrade to Stable…` on beta builds
+  - Quick Look settings (schema display, Data tab, dataset scan controls)
+  - `Updates` tab: automatic checks (`Daily`/`Weekly`/`Monthly`), in-app install of signed updates, `Stable`/`Beta` release channel, `Reinstall Latest Release…`, `Downgrade to Stable…` on beta builds
   - automatic importer install and update on app launch
 
 Since `0.3.0`, naming is standardized to Apple's official **Quick Look** terminology.
 
-The importer reads only Parquet footer metadata (`...<metadata_len><PAR1>`), does not parse row contents, and writes Spotlight metadata for search.
+The importer reads only Parquet footer metadata (`...<metadata_len><PAR1>`), does not parse row contents, and writes Spotlight metadata for search. Row data is read only by the Quick Look `Data` tab.
 
 ## Prerequisites
 
@@ -120,7 +120,7 @@ When `Check for Updates` (menu or `Updates` tab) finds a newer release, click `I
 
 `Updates` → `Release channel`: `Stable` (default) offers only regular releases; `Beta` also offers pre-releases (tags like `v0.8.0-beta.1`, published as GitHub pre-releases, signed and installed the same way). Switching back to `Stable` never downgrades: a beta stays installed until a newer stable release is out (e.g. `0.8.0` after `0.8.0-beta.2`). Apps older than 0.7.0-beta.1 only see stable releases.
 
-The current beta, [0.8.0-beta.1](https://github.com/rkrug/parquet-spotlight-quicklook/releases/tag/v0.8.0-beta.1), adds a Quick Look `Data` tab with the first rows of files and datasets (including nested values) and `Reinstall Latest Release…`.
+`Updates` → `Reinstall Latest Release…` installs the latest release of the selected channel (last beta on `Beta`, last stable on `Stable`) even when it is not newer than the running version, with the same signature checks, and replaces the Spotlight importer: useful to get back to an official build or to repair an install.
 
 To leave a beta right away, use `Updates` → `Downgrade to Stable…` (beta builds from 0.7.1-beta.1 on): it installs the newest stable release with the same signature checks, switches the channel to Stable, and replaces the Spotlight importer with the stable one.
 
@@ -173,7 +173,7 @@ Use `Parquet Quick Look and Index.app` from `~/Applications` to:
 - repair registration and refresh caches
 - uninstall importer + Quick Look app (including settings cleanup)
 - change preview settings used by Quick Look
-- check for updates (menu item + Updates tab) and install them in the app, with `Skip this version` option
+- check for updates (menu item + Updates tab), with `Skip this version` option
 
 ## Uninstall
 
@@ -268,7 +268,7 @@ Dataset scan behavior is controlled in app settings:
 - `Max files (if not all)`
 - `Recursive scan folders`
 
-7. Run script + core logic test suite (this is what CI runs):
+7. Run script + core logic test suite:
 
 ```bash
 ./scripts/test_scripts.sh
@@ -281,7 +281,7 @@ This also runs:
 ./scripts/test_importer_summary.sh
 ```
 
-`test_core.sh` validates trusted update URL/tag checks, version and release-channel logic, update signatures, error mapping, diagnostics redaction rules, uninstall argument construction, parser sanity bounds, and the footer parser against the fixtures in `Tests/fixtures`, including a seeded fuzz pass over corrupted footers (`PARQUET_FUZZ_SEED` / `PARQUET_FUZZ_CASES`).
+`test_core.sh` validates trusted update URL/tag checks, version comparisons, error mapping, diagnostics redaction rules, uninstall argument construction, parser sanity bounds, and the footer parser against the fixtures in `Tests/fixtures`.
 
 `test_importer_summary.sh` calls the Spotlight importer's entry point on the same fixtures. Both tests compare with `Tests/fixtures/expected.txt`, whose row and column counts come from Apache Arrow; regenerate fixtures with `Rscript Tests/fixtures/make_fixtures.R` (needs the R `arrow` package).
 
@@ -460,6 +460,7 @@ Keyword tokens written by importer:
 - Preview extension bundle ID: `com.rkrug.parquetindexer.previewhost.preview`
 - Quick Look host app bundle ID: `com.rkrug.parquetindexer.previewhost`
 - The importer extracts column names only from footers up to 16 MiB and indexes at most 4096 columns per file; larger footers are still indexed as Parquet files, without column names.
+- The Quick Look Data tab reads ZSTD pages with the Zstandard decoder from zstd 1.5.7 (`third_party/zstd`, BSD license, © Meta Platforms, Inc.); Spotlight never reads row data.
 - Quick Look shows footer details below the schema: writer, row groups, compressed/uncompressed size, date range, codec and size per column, and the key/value metadata (at most 200 row groups and 256 metadata entries listed; values cut to 4 KiB).
 - Quick Look preview parsing bounds nesting depth, declared container sizes, and skip work, and saturates dataset size/row totals. Well-formed files render as before; malformed footers are rejected.
 
