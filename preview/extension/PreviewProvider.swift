@@ -778,6 +778,13 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             .popover .item:hover{background:#e0ecff}
             .popover .item span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             .popover .count{color:#6b7280}
+            .seg .sub-btn{border-radius:0}
+            .seg .sub-btn:first-child{border-radius:6px 0 0 6px}
+            .seg .sub-btn:last-child{border-radius:0 6px 6px 0;margin-left:-1px}
+            .seg .sub-btn.on{background:#2563eb;border-color:#2563eb;color:#fff}
+            table.stats td{max-width:220px}
+            table.stats td.top{max-width:420px}
+            table.stats a.link{color:#1d4ed8;text-decoration:underline;text-decoration-color:rgba(29,78,216,.35)}
             @media (prefers-color-scheme: dark){
               .tabs{border-bottom-color:#3f434a}
               .tab{color:#9ca3af}
@@ -795,6 +802,8 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
               table.data tr.filters input.on{border-color:#60a5fa}
               .popover{background:#2a2c30;border-color:#4b5058;box-shadow:0 6px 18px rgba(0,0,0,.5)}
               .popover .item:hover{background:#1e3a5f}
+              .seg .sub-btn.on{background:#3b82f6;border-color:#3b82f6;color:#fff}
+              table.stats a.link{color:#93c5fd;text-decoration-color:rgba(147,197,253,.4)}
             }
           </style>
           <div class=\"tabs\">
@@ -812,11 +821,15 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
     // footerColumns: leaf columns, for the sort kind of each column.
     private func dataTabHTML(_ table: ParquetRowReader.Table, totalRows: Int64, footerColumns: [ColumnInfo], settings: PreviewSettings) -> String {
         let kinds = ParquetDataTab.columnKinds(names: table.columns, nested: table.nestedColumns, footerColumns: footerColumns)
+        let types = ParquetDataTab.columnTypes(names: table.columns, nested: table.nestedColumns, footerColumns: footerColumns)
+        let stats = ParquetColumnStats.compute(table: table, types: types, kinds: kinds)
+        let statsJSON = (try? JSONEncoder().encode(stats)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
         let payload: [String: Any] = [
             "columns": table.columns,
             "rows": table.rows.map { row in row.map { cell -> Any in cell ?? NSNull() } },
             "nested": table.nestedColumns,
             "kinds": kinds,
+            "stats": (try? JSONSerialization.jsonObject(with: Data(statsJSON.utf8))) ?? [],
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .map { String(decoding: $0, as: UTF8.self) }?
@@ -855,6 +868,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
           <div id=\"tab-data\" style=\"display:none\">
             <div class=\"muted\" style=\"margin-bottom:6px\">\(esc(info))</div>
             <div class=\"dt-bar\">
+              <span class=\"seg\"><button id=\"dt-view-rows\" class=\"sub-btn on\">Rows</button><button id=\"dt-view-stats\" class=\"sub-btn\">Stats</button></span>
               <input id=\"dt-global\" type=\"search\" placeholder=\"Filter all columns\" spellcheck=\"false\" autocomplete=\"off\" />
               <button id=\"dt-filters-btn\" class=\"sub-btn\">Column filters</button>
               <label class=\"muted\">Show <select id=\"dt-show\">\(showOptions)</select> rows</label>
@@ -863,6 +877,10 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             </div>
             <div id=\"data-scroll\" class=\"data-scroll\">
               <table class=\"data\"><thead><tr id=\"dt-head\">\(header)</tr><tr id=\"dt-filter-row\" class=\"filters\" style=\"display:none\">\(filters)</tr></thead><tbody id=\"data-body\"></tbody></table>
+            </div>
+            <div id=\"dt-stats\" style=\"display:none\">
+              <div class=\"muted\" style=\"margin-bottom:6px\">Over the \(formatInt(Int64(table.rows.count))) loaded rows (\(formatInt(totalRows)) in the \(table.sourceFiles > 1 ? "dataset" : "file")); percentiles are nearest-rank values. Underlined figures show their rows. A text column whose values (at least \(Int(ParquetColumnStats.inferenceThresholdPercent))%) parse as one type shows the inferred type.</div>
+              <div class=\"data-scroll\"><table class=\"data stats\"><thead><tr><th>Column</th><th>Type</th><th>Nulls</th><th>Distinct</th><th>Min</th><th>Max</th><th>Mean</th><th>Std dev</th><th>p25</th><th>Median</th><th>p75</th><th>p95</th><th>p99</th><th>Top values</th></tr></thead><tbody id=\"dt-stats-body\"></tbody></table></div>
             </div>
             <div id=\"dt-popover\" class=\"popover\" style=\"display:none\"></div>
             <div id=\"cell-detail\" class=\"cell-detail muted\">Click a cell to see its full value.</div>
@@ -1000,6 +1018,64 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                   });
                 });
               }
+              // Stats view: one row per column (ParquetColumnStats). A figure with a filter is a
+              // link: it sets that column's filter and shows the rows.
+              const statsBox = document.getElementById('dt-stats');
+              const rowsParts = [box, document.getElementById('cell-detail')];
+              function showView(name){
+                const stats = name === 'stats';
+                statsBox.style.display = stats ? '' : 'none';
+                rowsParts.forEach(function(el){ el.style.display = stats ? 'none' : ''; });
+                document.getElementById('dt-view-rows').classList.toggle('on', !stats);
+                document.getElementById('dt-view-stats').classList.toggle('on', stats);
+                closePopover();
+                if (stats) { renderStats(); } else { render(); }
+              }
+              let statsDrawn = false;
+              function renderStats(){
+                if (statsDrawn) { return; }
+                statsDrawn = true;
+                const links = [];
+                function fig(f, c){
+                  if (!f) { return ''; }
+                  if (!f.filter) { return esc(f.text); }
+                  links.push([c, f.filter]);
+                  return '<a href="#" class="link" data-l="' + (links.length - 1) + '" title="Show rows: ' + esc(D.columns[c]) + ' ' + esc(f.filter) + '">' + esc(f.text.length > 60 ? f.text.slice(0, 60) + '…' : f.text) + '</a>';
+                }
+                let html = '';
+                (D.stats || []).forEach(function(s, c){
+                  if (s.unreadable) {
+                    html += '<tr><td>' + esc(s.name) + '</td><td>' + esc(s.type) + '</td><td colspan="12" class="null">not read by the preview</td></tr>';
+                    return;
+                  }
+                  const type = s.inferredLabel
+                    ? esc(s.inferredLabel) + (s.unparsed ? ' (' + fig(s.unparsed, c) + ' not)' : '')
+                    : esc(s.type || s.kind);
+                  const nulls = s.nulls.filter ? fig(s.nulls, c) + ' <span class="muted">(' + s.nullPercent.toFixed(1) + '%)</span>' : esc(s.nulls.text);
+                  const top = (s.top || []).map(function(t){
+                    links.push([c, t.filter]);
+                    return '<a href="#" class="link" data-l="' + (links.length - 1) + '">' + esc(t.value.length > 40 ? t.value.slice(0, 40) + '…' : t.value) + '</a> <span class="muted">(' + t.count + ')</span>';
+                  }).join(', ');
+                  html += '<tr><td>' + esc(s.name) + '</td><td>' + type + '</td><td>' + nulls + '</td><td>' + s.distinct + '</td><td>' + fig(s.min, c) + '</td><td>' + fig(s.max, c)
+                    + '</td><td>' + esc(s.mean || '') + '</td><td>' + esc(s.stddev || '') + '</td><td>' + fig(s.p25, c) + '</td><td>' + fig(s.median, c) + '</td><td>' + fig(s.p75, c)
+                    + '</td><td>' + fig(s.p95, c) + '</td><td>' + fig(s.p99, c) + '</td><td class="top">' + top + '</td></tr>';
+                });
+                const tbody = document.getElementById('dt-stats-body');
+                tbody.innerHTML = html || '<tr><td colspan="14" class="null">No columns.</td></tr>';
+                tbody.addEventListener('click', function(e){
+                  const a = e.target.closest('a.link');
+                  if (!a) { return; }
+                  e.preventDefault();
+                  const link = links[+a.dataset.l];
+                  q.filters[link[0]] = link[1];
+                  filterInputs[link[0]].value = link[1];
+                  showView('rows');
+                  showFilters();
+                  apply();
+                });
+              }
+              document.getElementById('dt-view-rows').addEventListener('click', function(e){ e.preventDefault(); showView('rows'); });
+              document.getElementById('dt-view-stats').addEventListener('click', function(e){ e.preventDefault(); showView('stats'); });
               box.addEventListener('scroll', render);
               globalInput.addEventListener('input', function(){ q.global = globalInput.value; apply(); });
               filterInputs.forEach(function(input){

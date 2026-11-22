@@ -792,11 +792,78 @@ func runDataTabTests() {
     assertEqual(js(c, "[PQ.exactFilter(null), PQ.exactFilter('x')]"), #"["is null","=x"]"#, "distinct value -> filter text")
 }
 
+// Stats view (ParquetColumnStats) over loaded rows, and its links through the Data tab script.
+func runColumnStatsTests(fixturesDir: String?) {
+    typealias S = ParquetColumnStats
+    let ints = (1...100).map { Optional(String($0)) } + [nil, nil]
+    let n = S.column(name: "n", type: "int32", kind: "number", values: ints)
+    assertEqual(n.rows, 102, "stats: rows")
+    assertEqual(n.nulls, S.Figure("2", filter: "is null"), "stats: nulls link to is null")
+    assertEqual(n.distinct, 100, "stats: distinct ignores nulls")
+    assertEqual(n.min, S.Figure("1", filter: "<=1"), "stats: numeric min")
+    assertEqual(n.max, S.Figure("100", filter: ">=100"), "stats: numeric max")
+    assertEqual(n.median?.text, "50", "stats: nearest-rank median")
+    assertEqual(n.p25?.text, "25", "stats: p25")
+    assertEqual(n.p95, S.Figure("95", filter: ">=95"), "stats: p95 links to rows at or above it")
+    assertEqual(n.p99, S.Figure("99", filter: ">=99"), "stats: p99")
+    assertEqual(n.mean, "50.5", "stats: mean")
+    assertEqual(n.stddev, "29.0115", "stats: sample standard deviation")
+    assertTrue(n.inferred == nil, "stats: typed numbers are not inferred")
+
+    // Text that is numbers apart from a few values: inferred, with the exceptions linked.
+    let mostly = (1...97).map { Optional(String($0)) } + ["n/a", "x", "-"]
+    let t = S.column(name: "t", type: "string", kind: "text", values: mostly)
+    assertEqual(t.inferred, "int64", "stats: 97% ints -> int64")
+    assertEqual(t.inferredLabel, "int64, except 3%", "stats: partial inference label")
+    assertEqual(t.unparsed, S.Figure("3", filter: "not int"), "stats: unparsed values link")
+    assertEqual(t.max?.text, "97", "stats: inferred numbers get numeric stats")
+    let below = S.column(name: "b", type: "string", kind: "text", values: (1...90).map { Optional(String($0)) } + (1...10).map { Optional("w\($0)") })
+    assertTrue(below.inferred == nil, "stats: under 95% is not inferred")
+    assertEqual(below.min?.filter, "=1", "stats: text min is an exact filter")
+    let dates = S.column(name: "d", type: "string", kind: "text", values: ["2024-01-02", "2023-12-31T10:00:00Z", "2024-05-01 08:30"])
+    assertEqual(dates.inferredLabel, "string → date (inferred)", "stats: full inference label")
+    assertEqual(dates.min?.text, "2023-12-31T10:00:00Z", "stats: ISO dates in time order")
+    let doubles = S.column(name: "f", type: "string", kind: "text", values: ["1.5", "2", "-3e2", ".5"])
+    assertEqual(doubles.inferred, "double", "stats: mixed ints and decimals -> double")
+    assertEqual(doubles.min?.text, "-3e2", "stats: exponent parses")
+    let top = S.column(name: "c", type: "string", kind: "text", values: ["b", "a", "b", "c", "a", "b", nil])
+    assertEqual(top.top.map(\.value), ["b", "a"], "stats: repeated values by count, then value")
+    assertEqual(top.top.first?.filter, "=b", "stats: top value link")
+    let nested = S.column(name: "l", type: "nested", kind: "nested", values: ["[\"a\"]", nil])
+    assertTrue(nested.min == nil && nested.distinct == 1, "stats: nested columns count only")
+    let bad = S.column(name: "x", type: "string", kind: "text", values: ["a"], unreadable: true)
+    assertTrue(bad.unreadable && bad.top.isEmpty, "stats: unreadable column has no figures")
+
+    // Every link selects the rows it describes, with the Data tab's filter code.
+    let c = dataTabContext()
+    let jsRows = mostly.map { $0.map { "\"\($0)\"" } ?? "null" }.joined(separator: ",")
+    c.evaluateScript("var T = [\(jsRows)].map(function(v){ return [v]; });")
+    func count(_ filter: String) -> String { js(c, "PQ.visible(T, ['text'], {global:'', filters:[\(filter.debugDescription)], show:0}).matched") }
+    assertEqual(count(t.unparsed!.filter!), "3", "stats link: not int")
+    assertEqual(count(t.p95!.filter!), "\(97 - Int(t.p95!.text)! + 1)", "stats link: p95 rows")
+    assertEqual(count(t.median!.filter!), "1", "stats link: median")
+    assertEqual(js(c, "[PQ.cellMatches(' 12 ', PQ.parseFilter('not int')), PQ.cellMatches('', PQ.parseFilter('not number')), PQ.cellMatches('TRUE', PQ.parseFilter('not bool')), PQ.cellMatches('2024-13', PQ.parseFilter('not date'))]"), "[false,false,false,true]", "not-type filters: trimmed, blanks never match")
+    assertEqual(js(c, "PQ.parseFilter('not foo')"), #"{"op":"has","text":"not foo"}"#, "not-type filter: unknown type is text")
+
+    if let fixturesDir {
+        let table = ParquetRowReader.read(at: URL(fileURLWithPath: "\(fixturesDir)/rows_snappy.parquet"), maxRows: 100, maxColumns: 100)
+        let footer = ParquetFooter.read(at: URL(fileURLWithPath: "\(fixturesDir)/rows_snappy.parquet"))
+        let kinds = ParquetDataTab.columnKinds(names: table.columns, nested: table.nestedColumns, footerColumns: footer.columns)
+        let types = ParquetDataTab.columnTypes(names: table.columns, nested: table.nestedColumns, footerColumns: footer.columns)
+        let stats = ParquetColumnStats.compute(table: table, types: types, kinds: kinds)
+        assertEqual(stats.count, table.columns.count, "stats fixture: one entry per column")
+        assertEqual(stats[0].max?.text, "100", "stats fixture: i32 max")
+        assertEqual(kinds[0], "number", "stats fixture: i32 sorts as a number")
+        assertTrue((try? JSONEncoder().encode(stats)) != nil, "stats fixture: encodes for the page")
+    }
+}
+
 @main
 struct CoreTestsMain {
     static func main() {
         runCoreTests()
         runDataTabTests()
+        runColumnStatsTests(fixturesDir: ProcessInfo.processInfo.environment["PARQUET_FIXTURES_DIR"])
         if let fixtures = ProcessInfo.processInfo.environment["PARQUET_FIXTURES_DIR"] {
             runFooterFixtureTests(fixturesDir: fixtures)
         }

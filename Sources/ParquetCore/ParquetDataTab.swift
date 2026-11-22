@@ -20,6 +20,16 @@ public enum ParquetDataTab {
     // One kind per table column. Columns are matched to footer leaves by their top-level name;
     // partition keys and columns missing from the footer are "text".
     public static func columnKinds(names: [String], nested: [Bool], footerColumns: [ParquetFooter.Column]) -> [String] {
+        let types = columnTypes(names: names, nested: nested, footerColumns: footerColumns)
+        return names.indices.map { index in
+            if index < nested.count && nested[index] { return "nested" }
+            return types[index].isEmpty ? "text" : kind(forType: types[index])
+        }
+    }
+
+    // Footer type label per table column ("nested" for lists, structs and maps; "" when the
+    // column is not in the footer, e.g. a partition key).
+    public static func columnTypes(names: [String], nested: [Bool], footerColumns: [ParquetFooter.Column]) -> [String] {
         var byName: [String: ParquetFooter.Column] = [:]
         for column in footerColumns {
             let top = column.path.first ?? column.name
@@ -27,8 +37,7 @@ public enum ParquetDataTab {
         }
         return names.enumerated().map { index, name in
             if index < nested.count && nested[index] { return "nested" }
-            guard let column = byName[name] else { return "text" }
-            return kind(forType: column.logicalType)
+            return byName[name]?.logicalType ?? ""
         }
     }
 
@@ -42,11 +51,20 @@ public enum ParquetDataTab {
     //   =text       exact value
     //   >n >=n <n <=n   numeric comparison (cells that are not numbers do not match)
     //   is null / not null
+    //   not int / not number / not bool / not date   non-empty values that do not parse as that
+    //                                               type (same patterns as ParquetColumnStats)
     public static let script = #"""
     var PQ = (function () {
       var UNREADABLE = '‹not read›';
       var collator = (typeof Intl !== 'undefined' && Intl.Collator)
         ? new Intl.Collator('en', { numeric: true, sensitivity: 'base' }) : null;
+
+      var TYPES = {
+        'int': /^[+-]?[0-9]+$/,
+        'number': /^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/,
+        'bool': /^(true|false)$/i,
+        'date': /^[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$/
+      };
 
       function num(s) {
         if (s === null || s === undefined) { return null; }
@@ -62,6 +80,9 @@ public enum ParquetDataTab {
         var low = s.toLowerCase();
         if (low === 'is null') { return { op: 'null' }; }
         if (low === 'not null') { return { op: 'notnull' }; }
+        if (Object.prototype.hasOwnProperty.call(TYPES, low.replace(/^not /, '')) && low.indexOf('not ') === 0) {
+          return { op: 'nottype', type: low.slice(4) };
+        }
         var m = /^(>=|<=|>|<|=)\s*([\s\S]*)$/.exec(s);
         if (m) {
           if (m[1] === '=') { return { op: 'eq', text: m[2] }; }
@@ -78,6 +99,7 @@ public enum ParquetDataTab {
           case 'notnull': return v !== null;
           case 'eq': return v !== null && v === f.text;
           case 'has': return v !== null && v.toLowerCase().indexOf(f.text) >= 0;
+          case 'nottype': return v !== null && v.trim() !== '' && !TYPES[f.type].test(v.trim());
         }
         var n = num(v);
         if (n === null) { return false; }

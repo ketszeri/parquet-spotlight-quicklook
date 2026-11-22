@@ -170,6 +170,7 @@ swift_universal "$APPEX_MACOS_DIR/ParquetQuickLookExtension" \
   "$ROOT_DIR/Sources/ParquetCore/ParquetFooterParser.swift" \
   "$ROOT_DIR/Sources/ParquetCore/ParquetDataset.swift" \
   "$ROOT_DIR/Sources/ParquetCore/ParquetDataTab.swift" \
+  "$ROOT_DIR/Sources/ParquetCore/ParquetColumnStats.swift" \
   -import-objc-header "$ZSTD_HEADER" \
   "$ROOT_DIR/Sources/ParquetCore/ParquetRowReader.swift" \
   "$ROOT_DIR/preview/extension/PreviewProvider.swift" \
