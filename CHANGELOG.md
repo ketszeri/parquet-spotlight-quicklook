@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 - Fork build on top of upstream `0.8.0-beta.1` (`upstream/dev`), merged into the fork's sync branch with the fork-only SonarCloud workflow kept.
 - Bumped importer, app, and extension builds to `18`; `CFBundleShortVersionString` stays `0.8.0` and the app's `ParquetReleaseVersion` is `0.8.0-ketszeri.1`, so the fork does not reuse an upstream version string.
 - Successor to the fork's 0.5.0-ketszeri.x row preview (PR #1): the Quick Look row-peek features are re-implemented on upstream's `ParquetRowReader` and Data tab (see the entries below as they land).
+- Data tab: filter all columns, per-column filters (`Column filters`: text contains, `=text` exact, `>n` `>=n` `<n` `<=n`, `is null`, `not null`), click a column name to sort (ascending, descending, file order; numbers numerically incl. int64 beyond 2^53, text case-insensitively with numeric runs, nulls last), `▾` lists a column's distinct values among the rows matching the other filters (click one for an exact filter), `Show` 10 / 50 / 100 / 500 / 1,000 / all rows, `Clear filters and sort`. Only the table body is redrawn, so the filter fields keep their text, focus and caret while typing. Esc or ⌘. closes the distinct-value list, then the column filters (they stay applied), then leaves the filter field. The logic is `ParquetDataTab.script` in `Sources/ParquetCore` (JavaScript, tested through JavaScriptCore in `Tests/core_tests.swift`); sort kinds come from the footer types (`ParquetDataTab.columnKinds`).
+- Quick Look preview follows the system appearance (dark mode) on the file, dataset and Data tab pages.
 
 ## 0.8.0-beta.1 - 2026-10-30 (pre-release)
 

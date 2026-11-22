@@ -1,6 +1,7 @@
 import Compression
 import CryptoKit
 import Foundation
+import JavaScriptCore
 
 private func assertTrue(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
@@ -723,10 +724,79 @@ private func runDatasetTests(fixturesDir: String) {
     assertTrue(ParquetDataset.summarize(at: empty, maxFiles: 100, recursive: true, maxPartitionValuesPerKey: 25) == nil, "dataset: no parquet files -> nil")
 }
 
+// Data tab script (ParquetDataTab.script), run through JavaScriptCore. `js` returns the JSON of
+// an expression.
+private func dataTabContext() -> JSContext {
+    let context = JSContext()!
+    context.exceptionHandler = { _, exception in
+        fputs("FAIL: Data tab script threw: \(exception?.toString() ?? "?")\n", stderr)
+        exit(1)
+    }
+    context.evaluateScript(ParquetDataTab.script)
+    return context
+}
+
+private func js(_ context: JSContext, _ expression: String) -> String {
+    context.evaluateScript("JSON.stringify(\(expression))")?.toString() ?? "undefined"
+}
+
+func runDataTabTests() {
+    assertEqual(ParquetDataTab.kind(forType: "int64"), "number", "kind: int64")
+    assertEqual(ParquetDataTab.kind(forType: "decimal(10,2)"), "number", "kind: decimal")
+    assertEqual(ParquetDataTab.kind(forType: "double"), "number", "kind: double")
+    assertEqual(ParquetDataTab.kind(forType: "timestamp[us]"), "date", "kind: timestamp")
+    assertEqual(ParquetDataTab.kind(forType: "date32[day]"), "date", "kind: date")
+    assertEqual(ParquetDataTab.kind(forType: "int96"), "date", "kind: INT96 is a timestamp")
+    assertEqual(ParquetDataTab.kind(forType: "string"), "text", "kind: string")
+    assertEqual(ParquetDataTab.kind(forType: "mixed<int32 | string>"), "text", "kind: mixed dataset column")
+    var a = ParquetFooter.Column(name: "a", logicalType: "int32", physicalType: "INT32")
+    a.path = ["a"]
+    var b = ParquetFooter.Column(name: "element", logicalType: "string", physicalType: "BYTE_ARRAY")
+    b.path = ["b", "list", "element"]
+    assertEqual(
+        ParquetDataTab.columnKinds(names: ["a", "b", "year"], nested: [false, true, false], footerColumns: [a, b]),
+        ["number", "nested", "text"],
+        "column kinds: footer type, nested, partition key"
+    )
+
+    let c = dataTabContext()
+    // Filters.
+    assertEqual(js(c, "PQ.parseFilter('  ')"), "null", "filter: blank is no filter")
+    assertEqual(js(c, "PQ.parseFilter('AbC')"), #"{"op":"has","text":"abc"}"#, "filter: substring, folded")
+    assertEqual(js(c, "PQ.parseFilter('=AbC')"), #"{"op":"eq","text":"AbC"}"#, "filter: exact keeps case")
+    assertEqual(js(c, "PQ.parseFilter('>= 2.5')"), #"{"op":">=","num":2.5}"#, "filter: numeric")
+    assertEqual(js(c, "PQ.parseFilter('>x')"), #"{"op":"has","text":">x"}"#, "filter: comparison without a number is text")
+    assertEqual(js(c, "PQ.parseFilter('IS NULL')"), #"{"op":"null"}"#, "filter: is null")
+    let rows = #"[["1","apple",null],["10","Banana","x"],["2","cherry","‹not read›"],[null,"apple pie","y"],["-3","date","x"]]"#
+    c.evaluateScript("var R = \(rows); var K = ['number','text','text'];")
+    func vis(_ q: String) -> String { js(c, "PQ.visible(R, K, \(q))") }
+    assertEqual(vis("{global:'APP', filters:[], sortColumn:null, show:0}"), #"{"indexes":[0,3],"matched":2}"#, "global filter: any column, case-insensitive")
+    assertEqual(vis("{global:'', filters:['', '=apple'], sortColumn:null, show:0}"), #"{"indexes":[0],"matched":1}"#, "column filter: exact")
+    assertEqual(vis("{global:'', filters:['>1'], sortColumn:null, show:0}"), #"{"indexes":[1,2],"matched":2}"#, "column filter: numeric, null never matches")
+    assertEqual(vis("{global:'', filters:['', '', 'is null'], sortColumn:null, show:0}"), #"{"indexes":[0,2],"matched":2}"#, "column filter: unreadable cells count as null")
+    assertEqual(vis("{global:'', filters:['', '', 'not null'], sortColumn:null, show:0}"), #"{"indexes":[1,3,4],"matched":3}"#, "column filter: not null")
+    assertEqual(vis("{global:'a', filters:['', 'e'], sortColumn:null, show:0}"), #"{"indexes":[0,3,4],"matched":3}"#, "global and column filters combine; placeholder text never matches")
+    // Sort: numbers numerically, text case-insensitively with numeric runs, nulls last both ways.
+    assertEqual(vis("{global:'', filters:[], sortColumn:0, sortDir:'asc', show:0}"), #"{"indexes":[4,0,2,1,3],"matched":5}"#, "sort: numbers ascending, null last")
+    assertEqual(vis("{global:'', filters:[], sortColumn:0, sortDir:'desc', show:0}"), #"{"indexes":[1,2,0,4,3],"matched":5}"#, "sort: numbers descending, null still last")
+    assertEqual(vis("{global:'', filters:[], sortColumn:1, sortDir:'asc', show:0}"), #"{"indexes":[0,3,1,2,4],"matched":5}"#, "sort: text folds case")
+    assertEqual(vis("{global:'', filters:[], sortColumn:0, sortDir:'off', show:0}"), #"{"indexes":[0,1,2,3,4],"matched":5}"#, "sort off: file order")
+    assertEqual(vis("{global:'', filters:[], sortColumn:0, sortDir:'asc', show:2}"), #"{"indexes":[4,0],"matched":5}"#, "show caps the rows drawn, not the match count")
+    assertEqual(js(c, "PQ.compare('9223372036854775807', '9223372036854775806', 'number')"), "1", "sort: int64 beyond 2^53")
+    assertEqual(js(c, "PQ.compare('-20', '-3', 'number')"), "-1", "sort: negative integers")
+    assertEqual(js(c, "PQ.compare('a2', 'a10', 'text')"), "-1", "sort: numeric runs in text")
+    assertEqual(js(c, "[PQ.cycle('off'), PQ.cycle('asc'), PQ.cycle('desc')]"), #"["asc","desc","off"]"#, "sort click cycle")
+    // Distinct values.
+    assertEqual(js(c, "PQ.distinct(R, [0,1,2,3,4], 2, 10)"), #"{"values":[[null,2],["x",2],["y",1]],"total":3,"capped":false}"#, "distinct: by count, null first among ties")
+    assertEqual(js(c, "PQ.distinct(R, [0,1,2,3,4], 2, 1).values"), #"[[null,2]]"#, "distinct: limit")
+    assertEqual(js(c, "[PQ.exactFilter(null), PQ.exactFilter('x')]"), #"["is null","=x"]"#, "distinct value -> filter text")
+}
+
 @main
 struct CoreTestsMain {
     static func main() {
         runCoreTests()
+        runDataTabTests()
         if let fixtures = ProcessInfo.processInfo.environment["PARQUET_FIXTURES_DIR"] {
             runFooterFixtureTests(fixturesDir: fixtures)
         }

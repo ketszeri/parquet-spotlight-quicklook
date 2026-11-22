@@ -601,6 +601,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
             window.addEventListener('DOMContentLoaded', function(){ expandToDepth(\(settings.expandDepth)); });
           </script>
+          \(themeHTML())
         </head>
         <body>
           <h1>Parquet Quick Look\(esc(PreviewProvider.versionSuffix))</h1>
@@ -636,6 +637,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
           \(settings.showDataTab && metadata.valid ? dataTabHTML(
               ParquetRowReader.read(at: URL(fileURLWithPath: path), maxRows: settings.previewRows, maxColumns: ParquetParserBounds.maxPreviewColumns),
               totalRows: metadata.rowCount,
+              footerColumns: metadata.columns,
               settings: settings
           ) : "")
         </body>
@@ -710,6 +712,32 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         return html
     }
 
+    // Dark-mode colours for the parts both pages share; the Data tab's own overrides are in
+    // tabBarHTML(), after its light rules. Quick Look follows the system appearance.
+    private func themeHTML() -> String {
+        """
+          <meta name=\"color-scheme\" content=\"light dark\" />
+          <style>
+            @media (prefers-color-scheme: dark){
+              body{color:#e5e7eb;background:#1e1f22}
+              .muted,.label{color:#9ca3af}
+              .card{background:#2a2c30;border-color:#3f434a}
+              th,td{border-bottom-color:#373b41}
+              th{background:#26282c}
+              table.facts th{background:transparent}
+              td.group{color:#d1d5db}
+              td.field{color:#e5e7eb}
+              .toggle{color:#9ca3af}
+              .toggle:hover{background:#3a3e45;color:#f3f4f6}
+              .export-pane{background:#26282c;border-color:#3f434a}
+              .export-pane textarea{background:#1e1f22;color:#e5e7eb;border-color:#3f434a}
+              .sub-btn{background:#2f3237;color:#e5e7eb;border-color:#4b5058}
+              .sub-btn:hover{background:#3a3e45}
+            }
+          </style>
+        """
+    }
+
     // Schema | Data tab buttons plus the styles of both tabs (file and dataset pages).
     private func tabBarHTML() -> String {
         """
@@ -731,7 +759,43 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             .cell-detail .tree{margin-left:18px}
             .cell-detail .key{color:#6b7280}
             .cell-detail .nul{color:#9ca3af;font-style:italic}
-            table.data th.noted{color:#6b7280;cursor:help}
+            table.data th.col{cursor:pointer;user-select:none}
+            table.data th .sort{color:#2563eb;margin-left:3px}
+            table.data th .note{color:#6b7280;cursor:help;margin-left:3px}
+            table.data th .dv{border:none;background:transparent;color:#6b7280;cursor:pointer;padding:0 2px;margin-left:4px;font-size:11px}
+            table.data th .dv:hover{color:#111827}
+            table.data tr.filters th{padding:3px 4px;background:#f1f5f9}
+            table.data tr.filters input{width:100%;min-width:70px;box-sizing:border-box;font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;color:#111827}
+            table.data tr.filters input.on{border-color:#2563eb}
+            .x{border:none;background:transparent;color:#6b7280;cursor:pointer;font-size:14px;line-height:14px;padding:0 4px}
+            .x:hover{color:#111827}
+            .dt-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 6px}
+            .dt-bar input,.dt-bar select{font-size:12px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#111827}
+            .dt-bar input{width:200px}
+            .popover{position:absolute;z-index:10;min-width:220px;max-width:420px;max-height:300px;overflow:auto;background:#fff;border:1px solid #cbd5e1;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.18);padding:6px}
+            .popover .head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:600;margin-bottom:4px}
+            .popover .item{display:flex;justify-content:space-between;gap:12px;width:100%;border:none;background:transparent;color:inherit;text-align:left;padding:3px 6px;border-radius:4px;cursor:pointer;font-size:12px}
+            .popover .item:hover{background:#e0ecff}
+            .popover .item span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .popover .count{color:#6b7280}
+            @media (prefers-color-scheme: dark){
+              .tabs{border-bottom-color:#3f434a}
+              .tab{color:#9ca3af}
+              .tab.active{background:#1e1f22;border-color:#3f434a;color:#f3f4f6}
+              .data-scroll{border-color:#373b41}
+              table.data td.rn,table.data td.null{color:#6b7280}
+              table.data td.sel{background:#1e3a5f}
+              table.data td.nested{color:#93c5fd}
+              .cell-detail{background:#26282c;border-color:#373b41}
+              .cell-detail .key,table.data th .note,table.data th .dv,.x,.popover .count{color:#9ca3af}
+              table.data th .dv:hover,.x:hover{color:#f3f4f6}
+              table.data th .sort{color:#60a5fa}
+              table.data tr.filters th{background:#2a2c30}
+              table.data tr.filters input,.dt-bar input,.dt-bar select{background:#1e1f22;color:#e5e7eb;border-color:#4b5058}
+              table.data tr.filters input.on{border-color:#60a5fa}
+              .popover{background:#2a2c30;border-color:#4b5058;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+              .popover .item:hover{background:#1e3a5f}
+            }
           </style>
           <div class=\"tabs\">
             <button id=\"tab-btn-schema\" class=\"tab active\" onclick=\"showTab('schema');return false;\">Schema</button>
@@ -742,17 +806,21 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
 
     // Data tab (#25): the first rows as embedded JSON, drawn by JavaScript only for the visible
     // part of the scroll area, so thousands of rows stay smooth. Quick Look cannot call back into
-    // the extension, so the rows are fixed when the preview is generated.
+    // the extension, so the rows are fixed when the preview is generated; filtering, sorting and
+    // the distinct-value list run over them in the page (ParquetDataTab.script).
     // totalRows: rows in the file or dataset, for the "First n of m rows" line.
-    private func dataTabHTML(_ table: ParquetRowReader.Table, totalRows: Int64, settings: PreviewSettings) -> String {
+    // footerColumns: leaf columns, for the sort kind of each column.
+    private func dataTabHTML(_ table: ParquetRowReader.Table, totalRows: Int64, footerColumns: [ColumnInfo], settings: PreviewSettings) -> String {
+        let kinds = ParquetDataTab.columnKinds(names: table.columns, nested: table.nestedColumns, footerColumns: footerColumns)
         let payload: [String: Any] = [
             "columns": table.columns,
             "rows": table.rows.map { row in row.map { cell -> Any in cell ?? NSNull() } },
             "nested": table.nestedColumns,
+            "kinds": kinds,
         ]
         let json = (try? JSONSerialization.data(withJSONObject: payload))
             .map { String(decoding: $0, as: UTF8.self) }?
-            .replacingOccurrences(of: "</", with: "<\\/") ?? "{\"columns\":[],\"rows\":[]}"
+            .replacingOccurrences(of: "</", with: "<\\/") ?? "{\"columns\":[],\"rows\":[],\"kinds\":[]}"
 
         var info = "First \(formatInt(Int64(table.rows.count))) of \(formatInt(totalRows)) rows"
         if table.sourceFiles > 1 {
@@ -764,28 +832,43 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
         if table.hiddenColumns > 0 {
             info += ", first \(table.columns.count) columns (\(table.hiddenColumns) more not shown)"
         }
-        info += ". Change the number of rows in Parquet Quick Look and Index (⌘,)."
-        // Columns the preview could not read get ⓘ in the header: the reason as a tooltip and, on
-        // click, in the detail panel. It concerns the preview only, not the file.
+        info += " loaded. Filters and sorting apply to these rows. Change the number of rows in Parquet Quick Look and Index (⌘,)."
+        // Click a column name to sort (ascending, descending, file order); ▾ lists its distinct
+        // values. Columns the preview could not read get ⓘ: the reason as a tooltip and, on click,
+        // in the detail panel. It concerns the preview only, not the file.
+        let filterHelp = "Filter: text (contains), =text (exact), >n, >=n, <n, <=n, is null, not null"
         var header = "<th>#</th>"
+        var filters = "<th><button id=\"dt-filters-close\" class=\"x\" title=\"Close column filters (Esc)\">×</button></th>"
         for (c, name) in table.columns.enumerated() {
-            if c < table.columnNotes.count, let note = table.columnNotes[c] {
-                let reason = "Not shown in this preview: \(note). The file itself is fine."
-                header += "<th class=\"noted\" data-c=\"\(c)\" title=\"\(esc(reason))\">\(esc(name)) ⓘ</th>"
-            } else {
-                header += "<th>\(esc(name))</th>"
+            var note = ""
+            if c < table.columnNotes.count, let reason = table.columnNotes[c] {
+                note = "<span class=\"note\" data-c=\"\(c)\" title=\"\(esc("Not shown in this preview: \(reason). The file itself is fine."))\">ⓘ</span>"
             }
+            header += "<th class=\"col\" data-c=\"\(c)\" title=\"Sort by \(esc(name))\"><span class=\"cname\">\(esc(name))</span><span class=\"sort\"></span>\(note)<button class=\"dv\" data-c=\"\(c)\" title=\"Distinct values\">▾</button></th>"
+            filters += "<th><input data-c=\"\(c)\" placeholder=\"filter\" title=\"\(esc(filterHelp))\" spellcheck=\"false\" autocomplete=\"off\" /></th>"
         }
+        let showOptions = ParquetDataTab.showChoices.map { n in
+            "<option value=\"\(n)\"\(n == 0 ? " selected" : "")>\(n == 0 ? "all" : formatInt(Int64(n)))</option>"
+        }.joined()
 
         return """
           <div id=\"tab-data\" style=\"display:none\">
             <div class=\"muted\" style=\"margin-bottom:6px\">\(esc(info))</div>
-            <div id=\"data-scroll\" class=\"data-scroll\">
-              <table class=\"data\"><thead><tr>\(header)</tr></thead><tbody id=\"data-body\"></tbody></table>
+            <div class=\"dt-bar\">
+              <input id=\"dt-global\" type=\"search\" placeholder=\"Filter all columns\" spellcheck=\"false\" autocomplete=\"off\" />
+              <button id=\"dt-filters-btn\" class=\"sub-btn\">Column filters</button>
+              <label class=\"muted\">Show <select id=\"dt-show\">\(showOptions)</select> rows</label>
+              <button id=\"dt-clear\" class=\"sub-btn\">Clear filters and sort</button>
+              <span id=\"dt-summary\" class=\"muted\"></span>
             </div>
+            <div id=\"data-scroll\" class=\"data-scroll\">
+              <table class=\"data\"><thead><tr id=\"dt-head\">\(header)</tr><tr id=\"dt-filter-row\" class=\"filters\" style=\"display:none\">\(filters)</tr></thead><tbody id=\"data-body\"></tbody></table>
+            </div>
+            <div id=\"dt-popover\" class=\"popover\" style=\"display:none\"></div>
             <div id=\"cell-detail\" class=\"cell-detail muted\">Click a cell to see its full value.</div>
           </div>
           <script>
+            \(ParquetDataTab.script)
             (function(){
               const D = \(json);
               const H = 24;
@@ -793,8 +876,18 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
               const body = document.getElementById('data-body');
               const n = D.columns.length;
               const nested = D.nested || [];
+              const kinds = D.kinds || [];
               const parsed = new Map();
+              const q = { global: '', filters: D.columns.map(function(){ return ''; }), sortColumn: null, sortDir: 'off', show: 0 };
+              let V = D.rows.map(function(_, i){ return i; });
+              let matched = V.length;
               let selected = null;
+              const globalInput = document.getElementById('dt-global');
+              const filterRow = document.getElementById('dt-filter-row');
+              const filterInputs = Array.from(filterRow.querySelectorAll('input[data-c]'));
+              const filtersBtn = document.getElementById('dt-filters-btn');
+              const pop = document.getElementById('dt-popover');
+              const summary = document.getElementById('dt-summary');
               function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
               // Nested cells hold JSON (lists, structs, maps; leaf values as strings).
               function value(r, c){
@@ -823,9 +916,10 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
               }
               function render(){
                 const first = Math.max(0, Math.floor(box.scrollTop / H) - 10);
-                const last = Math.min(D.rows.length, first + Math.ceil(box.clientHeight / H) + 30);
+                const last = Math.min(V.length, first + Math.ceil(box.clientHeight / H) + 30);
                 let html = '<tr><td colspan="' + (n + 1) + '" style="height:' + (first * H) + 'px;padding:0;border:0"></td></tr>';
-                for (let r = first; r < last; r++) {
+                for (let k = first; k < last; k++) {
+                  const r = V[k];
                   html += '<tr><td class="rn">' + (r + 1) + '</td>';
                   const row = D.rows[r];
                   for (let c = 0; c < n; c++) {
@@ -838,16 +932,127 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                   }
                   html += '</tr>';
                 }
-                html += '<tr><td colspan="' + (n + 1) + '" style="height:' + ((D.rows.length - last) * H) + 'px;padding:0;border:0"></td></tr>';
+                html += '<tr><td colspan="' + (n + 1) + '" style="height:' + ((V.length - last) * H) + 'px;padding:0;border:0"></td></tr>';
                 body.innerHTML = html;
               }
-              box.addEventListener('scroll', render);
-              document.querySelectorAll('#tab-data th.noted').forEach(function(th){
-                th.addEventListener('click', function(){
-                  const detail = document.getElementById('cell-detail');
-                  detail.classList.remove('muted');
-                  detail.textContent = D.columns[+th.dataset.c] + ': ' + th.title;
+              // Recomputes the rows to draw. Only the table body is redrawn: the filter fields
+              // stay in place, so typing never loses text, focus or the caret.
+              function apply(){
+                const result = PQ.visible(D.rows, kinds, q);
+                V = result.indexes;
+                matched = result.matched;
+                const active = q.filters.filter(function(f){ return f.trim() !== ''; }).length;
+                filterInputs.forEach(function(input){ input.classList.toggle('on', input.value.trim() !== ''); });
+                filtersBtn.textContent = active ? 'Column filters (' + active + ')' : 'Column filters';
+                const filtered = active > 0 || q.global.trim() !== '';
+                summary.textContent = filtered
+                  ? matched + ' of ' + D.rows.length + ' loaded rows match' + (V.length < matched ? ', showing ' + V.length : '') + '.'
+                  : (V.length < D.rows.length ? 'Showing ' + V.length + ' of ' + D.rows.length + ' loaded rows.' : '');
+                document.querySelectorAll('#dt-head th.col').forEach(function(th){
+                  const c = +th.dataset.c;
+                  th.querySelector('.sort').textContent = q.sortColumn === c && q.sortDir === 'asc' ? '▲' : q.sortColumn === c && q.sortDir === 'desc' ? '▼' : '';
                 });
+                box.scrollTop = 0;
+                render();
+              }
+              function placeFilterRow(){
+                const top = document.getElementById('dt-head').offsetHeight;
+                filterRow.querySelectorAll('th').forEach(function(th){ th.style.top = top + 'px'; });
+              }
+              function showFilters(focusColumn){
+                filterRow.style.display = '';
+                placeFilterRow();
+                if (focusColumn !== undefined) { filterInputs[focusColumn].focus(); }
+              }
+              // Hides the filter row; its filters stay applied (the button shows how many).
+              function hideFilters(){
+                if (filterRow.contains(document.activeElement)) { document.activeElement.blur(); }
+                filterRow.style.display = 'none';
+              }
+              function closePopover(){ pop.style.display = 'none'; pop.innerHTML = ''; pop.dataset.c = ''; }
+              // Distinct values of column c among the rows matching every other filter.
+              function openPopover(c, anchor){
+                const others = Object.assign({}, q, { filters: q.filters.map(function(f, i){ return i === c ? '' : f; }), sortColumn: null, show: 0 });
+                const rows = PQ.visible(D.rows, kinds, others).indexes;
+                const result = PQ.distinct(D.rows, rows, c, 50);
+                let html = '<div class="head"><span>' + esc(D.columns[c]) + '</span><button class="x" id="dt-pop-close" title="Close (Esc)">×</button></div>'
+                  + '<div class="muted" style="margin-bottom:4px">' + (result.total > result.values.length ? 'Top ' + result.values.length + ' of ' + (result.capped ? 'over ' : '') + result.total : result.total) + ' distinct values in ' + rows.length + ' rows. Click one to filter.</div>';
+                result.values.forEach(function(entry, i){
+                  const label = entry[0] === null ? 'null' : (entry[0].length > 120 ? entry[0].slice(0, 120) + '…' : entry[0]);
+                  html += '<button class="item" data-i="' + i + '"><span' + (entry[0] === null ? ' class="muted"' : '') + '>' + esc(label) + '</span><span class="count">' + entry[1] + '</span></button>';
+                });
+                pop.innerHTML = html;
+                pop.dataset.c = String(c);
+                pop.style.display = 'block';
+                const rect = anchor.getBoundingClientRect();
+                pop.style.left = Math.max(4, Math.min(rect.left + window.scrollX, window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - 4)) + 'px';
+                pop.style.top = (rect.bottom + window.scrollY + 2) + 'px';
+                document.getElementById('dt-pop-close').addEventListener('click', function(e){ e.preventDefault(); closePopover(); });
+                pop.querySelectorAll('.item').forEach(function(item){
+                  item.addEventListener('click', function(e){
+                    e.preventDefault();
+                    const text = PQ.exactFilter(result.values[+item.dataset.i][0]);
+                    q.filters[c] = text;
+                    filterInputs[c].value = text;
+                    closePopover();
+                    showFilters();
+                    apply();
+                  });
+                });
+              }
+              box.addEventListener('scroll', render);
+              globalInput.addEventListener('input', function(){ q.global = globalInput.value; apply(); });
+              filterInputs.forEach(function(input){
+                input.addEventListener('input', function(){ q.filters[+input.dataset.c] = input.value; apply(); });
+              });
+              filtersBtn.addEventListener('click', function(e){
+                e.preventDefault();
+                if (filterRow.style.display === 'none') { showFilters(0); } else { hideFilters(); }
+              });
+              document.getElementById('dt-filters-close').addEventListener('click', function(e){ e.preventDefault(); hideFilters(); });
+              document.getElementById('dt-show').addEventListener('change', function(e){ q.show = +e.target.value; apply(); });
+              document.getElementById('dt-clear').addEventListener('click', function(e){
+                e.preventDefault();
+                q.global = ''; globalInput.value = '';
+                q.filters = q.filters.map(function(){ return ''; });
+                filterInputs.forEach(function(input){ input.value = ''; });
+                q.sortColumn = null; q.sortDir = 'off';
+                closePopover();
+                apply();
+              });
+              document.querySelectorAll('#dt-head th.col').forEach(function(th){
+                th.addEventListener('click', function(e){
+                  const c = +th.dataset.c;
+                  if (e.target.closest('.dv')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (pop.style.display !== 'none' && pop.dataset.c === String(c)) { closePopover(); } else { openPopover(c, th); }
+                    return;
+                  }
+                  if (e.target.closest('.note')) {
+                    const detail = document.getElementById('cell-detail');
+                    detail.classList.remove('muted');
+                    detail.textContent = D.columns[c] + ': ' + e.target.closest('.note').title;
+                    return;
+                  }
+                  q.sortDir = q.sortColumn === c ? PQ.cycle(q.sortDir) : 'asc';
+                  q.sortColumn = q.sortDir === 'off' ? null : c;
+                  apply();
+                });
+              });
+              // Esc or ⌘. closes the distinct-value list first, then the column filters, then
+              // leaves the filter field. Only a key that closed something is kept from Quick Look.
+              document.addEventListener('keydown', function(e){
+                if (!(e.key === 'Escape' || (e.metaKey && e.key === '.'))) { return; }
+                let handled = true;
+                if (pop.style.display !== 'none') { closePopover(); }
+                else if (filterRow.style.display !== 'none') { hideFilters(); }
+                else if (document.activeElement === globalInput) { globalInput.blur(); }
+                else { handled = false; }
+                if (handled) { e.preventDefault(); e.stopPropagation(); }
+              }, true);
+              document.addEventListener('mousedown', function(e){
+                if (pop.style.display !== 'none' && !pop.contains(e.target) && !e.target.closest('.dv')) { closePopover(); }
               });
               body.addEventListener('click', function(e){
                 const td = e.target.closest('td[data-r]');
@@ -868,6 +1073,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                   document.getElementById('tab-' + t).style.display = t === name ? '' : 'none';
                   document.getElementById('tab-btn-' + t).classList.toggle('active', t === name);
                 });
+                if (name !== 'data') { closePopover(); }
                 if (name === 'data') { render(); }
               };
               \(settings.openDataTab ? "window.addEventListener('DOMContentLoaded', function(){ window.showTab('data'); });" : "")
@@ -1028,6 +1234,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
             }
             window.addEventListener('DOMContentLoaded', function(){ expandToDepth(\(settings.expandDepth)); });
           </script>
+          \(themeHTML())
         </head>
         <body>
           <h1>Parquet Dataset Quick Look\(esc(PreviewProvider.versionSuffix))</h1>
@@ -1076,6 +1283,7 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
                   recursive: settings.recursiveScan
               ),
               totalRows: dataset.totalRows,
+              footerColumns: dataset.columns,
               settings: settings
           ) : "")
         </body>

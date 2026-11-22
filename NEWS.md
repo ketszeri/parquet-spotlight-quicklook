@@ -5,6 +5,8 @@
 ### Changes
 
 - Fork build based on Parquet Quick Look and Index 0.8.0-beta.1, with the fork's row-peek features on top of the new Data tab.
+- Data tab: filter all columns or each column (`=x` exact, `>5`, `is null`, ...), sort by clicking a column name, list a column's distinct values with `▾` and click one to filter, and choose how many rows to show. Esc or ⌘. closes the value list and the filter row.
+- The Quick Look preview has a dark appearance in Dark Mode.
 
 ## 0.8.0-beta.1 - 2026-10-30 (pre-release)
 
